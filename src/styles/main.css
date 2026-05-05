@@ -1,0 +1,919 @@
+@import "tailwindcss";
+
+/*
+ * Semantic tokens (Tailwind v4 @theme maps primitives → utilities).
+ * Primitive ramps live under --dp-*; semantic aliases under --semantic-*.
+ */
+
+:root {
+  color-scheme: light;
+
+  --dp-neutral-0: #fffdf7;
+  --dp-neutral-1: #f5f3ea;
+  --dp-neutral-2: #ede8da;
+  --dp-neutral-3: #d8d0bd;
+  --dp-neutral-4: #6c6558;
+  --dp-neutral-5: #3a362d;
+  --dp-neutral-6: #1b1a17;
+
+  --dp-accent: #c9a227;
+  --dp-accent-hover: #b78f16;
+  --dp-accent-soft: #f1e3af;
+  --dp-warning: #b98021;
+  --dp-danger: #be4f45;
+
+  --semantic-background: var(--dp-neutral-1);
+  --semantic-surface: var(--dp-neutral-0);
+  --semantic-surface-elevated: var(--dp-neutral-2);
+  --semantic-border: var(--dp-neutral-3);
+  --semantic-text-primary: var(--dp-neutral-6);
+  --semantic-text-muted: var(--dp-neutral-4);
+  --semantic-accent: var(--dp-accent);
+  --semantic-accent-hover: var(--dp-accent-hover);
+  --semantic-accent-soft: var(--dp-accent-soft);
+  --semantic-accent-foreground: #ffffff;
+  --semantic-warning: var(--dp-warning);
+  --semantic-danger: var(--dp-danger);
+
+  --shadow-card: 0 1px 2px rgb(27 26 23 / 0.08);
+  --shadow-accent: 0 1px 2px color-mix(in oklab, var(--semantic-accent), transparent 72%);
+}
+
+:root.dark {
+  color-scheme: dark;
+
+  --semantic-background: #11100e;
+  --semantic-surface: #181713;
+  --semantic-surface-elevated: #222018;
+  --semantic-border: #3a362a;
+  --semantic-text-primary: #f6f1e3;
+  --semantic-text-muted: #b7ae9d;
+  --semantic-accent: #d6b84b;
+  --semantic-accent-hover: #e2c760;
+  --semantic-accent-soft: #3a3218;
+  --semantic-accent-foreground: #19170f;
+  --semantic-warning: #d6a338;
+  --semantic-danger: #d06960;
+
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.24);
+  --shadow-accent: 0 1px 2px rgb(0 0 0 / 0.28);
+}
+
+@theme inline {
+  --color-background: var(--semantic-background);
+  --color-foreground: var(--semantic-text-primary);
+  --color-muted: var(--semantic-text-muted);
+  --color-surface: var(--semantic-surface);
+  --color-surface-elevated: var(--semantic-surface-elevated);
+  --color-border: var(--semantic-border);
+  --color-accent: var(--semantic-accent);
+  --color-accent-hover: var(--semantic-accent-hover);
+  --color-accent-soft: var(--semantic-accent-soft);
+  --color-accent-foreground: var(--semantic-accent-foreground);
+  --color-warning: var(--semantic-warning);
+  --color-danger: var(--semantic-danger);
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+}
+
+@layer base {
+  * {
+    border-color: var(--semantic-border);
+  }
+
+  html,
+  body,
+  #app {
+    height: 100%;
+    overflow: hidden;
+  }
+
+  body {
+    background: var(--semantic-background);
+    font-family: var(--font-sans);
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    margin: 0;
+    overscroll-behavior: none;
+    text-rendering: optimizeLegibility;
+  }
+
+  kbd {
+    font-feature-settings: normal;
+  }
+
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  [role="gridcell"]:focus-visible {
+    outline: 2px solid color-mix(in oklab, var(--semantic-accent), white 12%);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .dp-header {
+    border-bottom: 1px solid var(--semantic-border);
+    background: color-mix(in oklab, var(--semantic-surface), var(--semantic-background) 18%);
+  }
+
+  .dp-header-inner {
+    align-items: center;
+    display: flex;
+    gap: 1rem;
+    justify-content: space-between;
+    margin-inline: auto;
+    max-width: 1600px;
+    padding: 0.75rem 1.25rem;
+    width: 100%;
+  }
+
+  .dp-brand {
+    align-items: center;
+    display: flex;
+    gap: 0.75rem;
+    min-width: 0;
+  }
+
+  .dp-brand-mark {
+    align-items: center;
+    background: color-mix(in oklab, var(--semantic-accent-soft), var(--semantic-surface) 36%);
+    border: 1px solid color-mix(in oklab, var(--semantic-accent), transparent 62%);
+    border-radius: 0.55rem;
+    color: var(--semantic-accent);
+    display: flex;
+    font-size: 0.72rem;
+    font-weight: 750;
+    height: 2.25rem;
+    justify-content: center;
+    letter-spacing: 0;
+    overflow: hidden;
+    width: 2.25rem;
+  }
+
+  .dp-brand-logo {
+    display: block;
+    height: 2.3rem;
+    object-fit: contain;
+    transform: scale(1.28);
+    width: 2.3rem;
+  }
+
+  :root.dark .dp-brand-mark {
+    background: #f6f1e3;
+    border-color: color-mix(in oklab, var(--semantic-accent), transparent 36%);
+  }
+
+  .dp-title {
+    color: var(--semantic-text-primary);
+    font-size: 0.95rem;
+    font-weight: 700;
+    line-height: 1.15;
+  }
+
+  .dp-subtitle {
+    color: var(--semantic-text-muted);
+    font-size: 0.74rem;
+    line-height: 1.25;
+  }
+
+  .dp-actions {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    justify-content: flex-end;
+  }
+
+  .dp-shell-main {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-inline: auto;
+    max-width: 1600px;
+    min-height: 0;
+    overflow: hidden;
+    padding: 0.9rem 1.25rem;
+    width: 100%;
+  }
+
+  .dp-button {
+    align-items: center;
+    border-radius: 0.5rem;
+    display: inline-flex;
+    font-size: 0.84rem;
+    font-weight: 650;
+    height: 2.35rem;
+    justify-content: center;
+    min-width: 0;
+    padding-inline: 0.85rem;
+    transition:
+      background-color 160ms ease,
+      border-color 160ms ease,
+      box-shadow 160ms ease,
+      color 160ms ease,
+      filter 160ms ease;
+    white-space: nowrap;
+  }
+
+  .dp-button-primary {
+    background: var(--semantic-accent);
+    box-shadow: var(--shadow-accent);
+    color: var(--semantic-accent-foreground);
+  }
+
+  .dp-button-primary:hover {
+    background: var(--semantic-accent-hover);
+  }
+
+  .dp-button-secondary {
+    background: color-mix(in oklab, var(--semantic-surface-elevated), var(--semantic-background) 12%);
+    border: 1px solid var(--semantic-border);
+    color: var(--semantic-text-primary);
+  }
+
+  .dp-button-secondary:hover {
+    background: color-mix(in oklab, var(--semantic-surface-elevated), var(--semantic-accent-soft) 18%);
+    border-color: color-mix(in oklab, var(--semantic-border), var(--semantic-accent) 22%);
+  }
+
+  .dp-button:disabled {
+    cursor: default;
+    opacity: 0.48;
+    pointer-events: none;
+  }
+
+  .dp-icon-button {
+    align-items: center;
+    background: color-mix(in oklab, var(--semantic-surface-elevated), var(--semantic-background) 12%);
+    border: 1px solid var(--semantic-border);
+    border-radius: 0.5rem;
+    color: var(--semantic-text-primary);
+    display: inline-flex;
+    height: 2.35rem;
+    justify-content: center;
+    transition:
+      background-color 160ms ease,
+      border-color 160ms ease,
+      color 160ms ease;
+    width: 2.35rem;
+  }
+
+  .dp-icon-button:hover {
+    background: color-mix(in oklab, var(--semantic-surface-elevated), var(--semantic-accent-soft) 18%);
+    border-color: color-mix(in oklab, var(--semantic-border), var(--semantic-accent) 22%);
+  }
+
+  .dp-command-panel {
+    background: var(--semantic-surface);
+    border: 1px solid color-mix(in oklab, var(--semantic-border), transparent 18%);
+    border-radius: 0.75rem;
+    box-shadow: var(--shadow-card);
+    flex: 0 0 auto;
+    padding: 0.7rem;
+  }
+
+  .dp-search-form {
+    display: grid;
+    gap: 0.55rem;
+  }
+
+  .dp-search-command-row {
+    align-items: center;
+    display: grid;
+    gap: 0.55rem;
+    grid-template-columns: minmax(14rem, 1fr) auto auto auto auto;
+  }
+
+  .dp-search-context-row {
+    align-items: start;
+    display: grid;
+    gap: 0.35rem;
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 2.1rem;
+  }
+
+  .dp-search-input {
+    background: color-mix(in oklab, var(--semantic-background), black 2%);
+    border: 1px solid var(--semantic-border);
+    border-radius: 0.5rem;
+    color: var(--semantic-text-primary);
+    font-size: 0.88rem;
+    height: 2.35rem;
+    min-width: 0;
+    padding-inline: 0.85rem;
+    transition:
+      background-color 160ms ease,
+      border-color 160ms ease,
+      box-shadow 160ms ease;
+    width: 100%;
+  }
+
+  .dp-search-input::placeholder {
+    color: color-mix(in oklab, var(--semantic-text-muted), transparent 20%);
+  }
+
+  .dp-search-input:focus {
+    border-color: color-mix(in oklab, var(--semantic-accent), var(--semantic-border) 15%);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--semantic-accent), transparent 84%);
+    outline: none;
+  }
+
+  .dp-limit-control {
+    align-items: center;
+    background: color-mix(in oklab, var(--semantic-surface-elevated), var(--semantic-background) 14%);
+    border: 1px solid var(--semantic-border);
+    border-radius: 0.5rem;
+    color: var(--semantic-text-muted);
+    display: inline-flex;
+    font-size: 0.74rem;
+    font-weight: 650;
+    gap: 0.45rem;
+    height: 2.35rem;
+    padding-inline: 0.75rem;
+    position: relative;
+  }
+
+  .dp-limit-trigger {
+    align-items: center;
+    background: transparent;
+    color: var(--semantic-text-primary);
+    display: inline-flex;
+    font-size: 0.84rem;
+    font-weight: 700;
+    gap: 0.4rem;
+    height: 100%;
+    outline: none;
+  }
+
+  .dp-limit-trigger:disabled {
+    cursor: default;
+  }
+
+  .dp-limit-value {
+    font-variant-numeric: tabular-nums;
+    min-width: 2.6rem;
+    text-align: left;
+  }
+
+  .dp-limit-chevron {
+    border-bottom: 1.5px solid currentColor;
+    border-right: 1.5px solid currentColor;
+    display: block;
+    height: 0.38rem;
+    margin-top: -0.16rem;
+    opacity: 0.84;
+    transform: rotate(45deg);
+    width: 0.38rem;
+  }
+
+  .dp-limit-menu {
+    background: color-mix(in oklab, var(--semantic-surface), var(--semantic-background) 8%);
+    border: 1px solid color-mix(in oklab, var(--semantic-border), transparent 8%);
+    border-radius: 0.5rem;
+    box-shadow:
+      0 10px 28px rgb(0 0 0 / 0.22),
+      0 1px 1px rgb(0 0 0 / 0.18);
+    display: grid;
+    gap: 0.08rem;
+    min-width: 6.4rem;
+    padding: 0.25rem;
+    position: absolute;
+    right: 0;
+    top: calc(100% + 0.35rem);
+    z-index: 30;
+  }
+
+  .dp-limit-option {
+    border-radius: 0.35rem;
+    color: var(--semantic-text-muted);
+    cursor: pointer;
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 650;
+    line-height: 1;
+    padding: 0.52rem 0.62rem;
+    white-space: nowrap;
+  }
+
+  .dp-limit-option:hover,
+  .dp-limit-option:focus-visible {
+    background: var(--semantic-surface-elevated);
+    color: var(--semantic-text-primary);
+    outline: none;
+  }
+
+  .dp-limit-option[aria-selected="true"] {
+    background: color-mix(in oklab, var(--semantic-accent-soft), var(--semantic-surface) 52%);
+    color: var(--semantic-text-primary);
+    font-weight: 760;
+  }
+
+  .dp-search-meta {
+    color: var(--semantic-text-muted);
+    font-size: 0.72rem;
+    line-height: 1.35;
+    min-height: 1rem;
+    padding-inline: 0.1rem;
+  }
+
+  .dp-search-feedback {
+    color: var(--semantic-text-muted);
+    font-size: 0.72rem;
+    line-height: 1.35;
+    min-height: 1rem;
+    padding-inline: 0.1rem;
+  }
+
+  .dp-selected-empty {
+    color: var(--semantic-text-muted);
+  }
+
+  .dp-selected-files {
+    display: grid;
+    gap: 0.42rem;
+  }
+
+  .dp-selected-summary {
+    align-items: baseline;
+    display: flex;
+    gap: 0.75rem;
+    justify-content: space-between;
+    min-width: 0;
+  }
+
+  .dp-selected-title {
+    color: var(--semantic-text-primary);
+    font-size: 0.76rem;
+    font-weight: 700;
+    min-width: 0;
+  }
+
+  .dp-selected-detail {
+    color: var(--semantic-text-muted);
+    font-size: 0.72rem;
+    min-width: 0;
+    overflow: hidden;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dp-selected-file-list {
+    display: grid;
+    gap: 0.12rem;
+    grid-template-columns: 1fr;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .dp-selected-file,
+  .dp-selected-file-more {
+    min-width: 0;
+    padding-block: 0.08rem;
+  }
+
+  .dp-selected-file {
+    align-items: center;
+    display: grid;
+    gap: 0.65rem;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .dp-selected-file-name {
+    color: var(--semantic-text-primary);
+    font-size: 0.72rem;
+    font-weight: 550;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dp-selected-file-kind,
+  .dp-selected-file-more {
+    color: color-mix(in oklab, var(--semantic-text-muted), transparent 10%);
+    font-size: 0.68rem;
+    font-weight: 650;
+    white-space: nowrap;
+  }
+
+  .dp-selected-file-more {
+    align-items: center;
+    display: flex;
+  }
+
+  .dp-workspace {
+    background: color-mix(in oklab, var(--semantic-surface), var(--semantic-background) 10%);
+    border: 1px solid color-mix(in oklab, var(--semantic-border), transparent 12%);
+    border-radius: 0.75rem;
+    box-shadow: var(--shadow-card);
+  }
+
+  .dp-empty-state {
+    align-items: center;
+    display: flex;
+    flex: 1;
+    justify-content: center;
+    min-height: min(430px, 54vh);
+    padding: 2rem;
+  }
+
+  .dp-empty-content {
+    align-items: center;
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+    max-width: 28rem;
+    text-align: center;
+  }
+
+  .dp-empty-label {
+    color: var(--semantic-accent);
+    font-size: 0.72rem;
+    font-weight: 750;
+    letter-spacing: 0;
+    text-transform: uppercase;
+  }
+
+  .dp-empty-title {
+    color: var(--semantic-text-primary);
+    font-size: clamp(1.15rem, 1vw + 0.9rem, 1.75rem);
+    font-weight: 720;
+    line-height: 1.15;
+  }
+
+  .dp-empty-copy {
+    color: var(--semantic-text-muted);
+    font-size: 0.88rem;
+    line-height: 1.55;
+    max-width: 34rem;
+  }
+
+  .dp-data-surface {
+    background: var(--semantic-surface);
+    border: 1px solid color-mix(in oklab, var(--semantic-border), transparent 12%);
+    border-radius: 0.75rem;
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
+  }
+
+  .dp-results-surface {
+    background: var(--semantic-surface);
+    border: 1px solid color-mix(in oklab, var(--semantic-border), transparent 12%);
+    border-radius: 0.75rem;
+    box-shadow: var(--shadow-card);
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .dp-results-toolbar {
+    align-items: center;
+    border-bottom: 1px solid var(--semantic-border);
+    display: flex;
+    gap: 1rem;
+    justify-content: space-between;
+    min-height: 2.75rem;
+    padding: 0.55rem 0.75rem;
+  }
+
+  .dp-results-actions {
+    align-items: center;
+    display: flex;
+    flex: 0 0 auto;
+    gap: 0.45rem;
+    min-width: 0;
+  }
+
+  .dp-results-summary {
+    align-items: baseline;
+    display: flex;
+    gap: 0.65rem;
+    min-width: 0;
+  }
+
+  .dp-results-summary-title {
+    color: var(--semantic-text-primary);
+    font-size: 0.78rem;
+    font-weight: 720;
+    white-space: nowrap;
+  }
+
+  .dp-results-summary-meta {
+    color: var(--semantic-text-muted);
+    font-size: 0.7rem;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dp-results-file-select,
+  .dp-results-back {
+    background: transparent;
+    border: 1px solid color-mix(in oklab, var(--semantic-border), transparent 8%);
+    border-radius: 0.45rem;
+    color: var(--semantic-text-primary);
+    flex: 0 0 auto;
+    font-size: 0.72rem;
+    font-weight: 650;
+    height: 1.9rem;
+    padding-inline: 0.65rem;
+    transition:
+      background-color 160ms ease,
+      border-color 160ms ease;
+  }
+
+  .dp-results-file-select {
+    max-width: 16rem;
+    outline: none;
+    padding-inline: 0.45rem;
+  }
+
+  .dp-results-back:hover {
+    background: color-mix(in oklab, var(--semantic-surface-elevated), var(--semantic-accent-soft) 12%);
+    border-color: color-mix(in oklab, var(--semantic-border), var(--semantic-accent) 18%);
+  }
+
+  .dp-results-grid {
+    display: grid;
+  }
+
+  .dp-results-header {
+    background: color-mix(in oklab, var(--semantic-surface-elevated), var(--semantic-background) 14%);
+    border-bottom: 1px solid var(--semantic-border);
+    color: var(--semantic-text-muted);
+    font-size: 0.68rem;
+    font-weight: 720;
+    letter-spacing: 0;
+    position: sticky;
+    top: 0;
+    text-transform: uppercase;
+    z-index: 2;
+  }
+
+  .dp-results-header > div,
+  .dp-results-row > span {
+    border-right: 1px solid color-mix(in oklab, var(--semantic-border), transparent 20%);
+    overflow: hidden;
+    padding-inline: 0.75rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dp-results-header > div {
+    align-items: center;
+    display: flex;
+    height: 2rem;
+  }
+
+  .dp-results-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    outline: none;
+    scrollbar-gutter: stable;
+  }
+
+  .dp-grid-scroll {
+    scrollbar-gutter: stable;
+  }
+
+  .dp-results-rows {
+    position: relative;
+  }
+
+  .dp-results-row {
+    background: var(--semantic-surface);
+    border: 0;
+    border-bottom: 1px solid color-mix(in oklab, var(--semantic-border), transparent 30%);
+    color: var(--semantic-text-primary);
+    cursor: pointer;
+    left: 0;
+    padding: 0;
+    position: absolute;
+    right: 0;
+    text-align: left;
+    transition:
+      background-color 120ms ease,
+      color 120ms ease;
+    width: 100%;
+  }
+
+  .dp-results-row:hover,
+  .dp-results-row:focus-visible {
+    background: var(--semantic-surface-elevated);
+    outline: none;
+  }
+
+  .dp-results-row[data-active="true"] {
+    background: color-mix(in oklab, var(--semantic-accent-soft), var(--semantic-surface) 58%);
+  }
+
+  .dp-results-row > span {
+    align-items: center;
+    display: flex;
+    font-size: 0.72rem;
+    min-width: 0;
+  }
+
+  .dp-results-row > span[data-cell-kind="row"],
+  .dp-results-row > span[data-cell-kind="file"] {
+    color: var(--semantic-text-muted);
+  }
+
+  .dp-results-row > span[data-cell-kind="row"] {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .dp-results-row > span[data-cell-kind="value"] {
+    color: color-mix(in oklab, var(--semantic-text-primary), var(--semantic-text-muted) 22%);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 0.68rem;
+  }
+
+  .dp-results-row > span[data-match="true"] {
+    background: color-mix(in oklab, var(--semantic-accent-soft), var(--semantic-surface) 42%);
+    color: var(--semantic-text-primary);
+    font-weight: 720;
+  }
+
+  .dp-results-empty {
+    color: var(--semantic-text-muted);
+    font-size: 0.78rem;
+    padding: 1rem;
+  }
+
+  .dp-grid-header {
+    background: color-mix(in oklab, var(--semantic-surface-elevated), var(--semantic-background) 14%);
+    border-bottom: 1px solid var(--semantic-border);
+  }
+
+  .dp-grid-header-cell {
+    align-items: center;
+    border-right: 1px solid color-mix(in oklab, var(--semantic-border), transparent 20%);
+    color: var(--semantic-text-muted);
+    display: flex;
+    font-size: 0.68rem;
+    font-weight: 720;
+    letter-spacing: 0;
+    padding-inline: 0.75rem;
+    text-transform: uppercase;
+  }
+
+  .dp-status {
+    background: color-mix(in oklab, var(--semantic-surface), var(--semantic-background) 30%);
+    border: 1px solid color-mix(in oklab, var(--semantic-border), transparent 38%);
+    border-radius: 0.375rem;
+    color: var(--semantic-text-muted);
+    font-size: 0.73rem;
+    line-height: 1.32;
+    padding: 0.45rem 0.65rem;
+  }
+
+  .dp-status-content {
+    display: grid;
+    gap: 0.08rem;
+    min-height: 1.1rem;
+  }
+
+  .dp-status-primary {
+    color: var(--semantic-text-primary);
+    font-size: 0.73rem;
+    font-weight: 620;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dp-status-detail,
+  .dp-status-warning {
+    font-size: 0.7rem;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dp-status-detail {
+    color: var(--semantic-text-muted);
+  }
+
+  .dp-status-warning {
+    color: var(--semantic-warning);
+  }
+
+  .dp-status[data-placement="footer"] {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+  }
+
+  .dp-status[data-placement="footer"] .dp-status-content {
+    align-items: baseline;
+    display: flex;
+    gap: 0.65rem;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .dp-status[data-placement="footer"] .dp-status-primary,
+  .dp-status[data-placement="footer"] .dp-status-detail,
+  .dp-status[data-placement="footer"] .dp-status-warning {
+    min-width: 0;
+    white-space: nowrap;
+  }
+
+  .dp-status[data-placement="footer"] .dp-status-primary {
+    flex: 0 1 auto;
+    font-size: 0.72rem;
+  }
+
+  .dp-status[data-placement="footer"] .dp-status-detail,
+  .dp-status[data-placement="footer"] .dp-status-warning {
+    flex: 0 2 auto;
+    font-size: 0.68rem;
+  }
+
+  .dp-footer {
+    align-items: center;
+    border-top: 1px solid color-mix(in oklab, var(--semantic-border), transparent 18%);
+    color: var(--semantic-text-muted);
+    display: flex;
+    font-size: 0.7rem;
+    gap: 1rem;
+    justify-content: space-between;
+    min-height: 2rem;
+    padding: 0.42rem 1.25rem;
+  }
+
+  .dp-footer-status {
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .dp-footer-meta {
+    align-items: center;
+    display: flex;
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  @media (max-width: 760px) {
+    .dp-header-inner,
+    .dp-shell-main {
+      padding-inline: 0.85rem;
+    }
+
+    .dp-search-command-row {
+      grid-template-columns: 1fr 1fr;
+    }
+
+    .dp-search-input,
+    .dp-search-meta {
+      grid-column: 1 / -1;
+    }
+
+    .dp-selected-summary {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 0.2rem;
+    }
+
+    .dp-selected-detail {
+      text-align: left;
+      white-space: normal;
+    }
+
+    .dp-limit-control {
+      justify-content: space-between;
+    }
+
+    .dp-status-primary,
+    .dp-status-detail,
+    .dp-status-warning {
+      white-space: normal;
+    }
+
+    .dp-footer {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .dp-footer-meta {
+      white-space: normal;
+    }
+  }
+}

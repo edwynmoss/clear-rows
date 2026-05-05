@@ -1,0 +1,27 @@
+node_modules/
+dist/
+target/
+src-tauri/target/
+src-tauri/gen/
+
+.DS_Store
+Thumbs.db
+
+.env
+.env.*
+!.env.example
+
+*.log
+*.pdb
+*.exe
+
+/.vite-*
+/.playwright-cli/
+/output/
+
+# Local/private data exports. Keep only curated samples in samples/.
+/*.csv
+!/samples/*.csv
+
+# Source logo kept locally; app-ready assets live under public/ and src-tauri/icons/.
+/clear_rows_logo_transparent_1024.png

@@ -1,0 +1,322 @@
+import { renderCsvHeaderRow, type CsvPreviewGridRefs } from "../components/csv-preview-grid";
+import { createGridRow, updateGridRow } from "../components/grid-row";
+import {
+  CSV_DEFAULT_COL_WIDTH_PX,
+  CSV_ROW_HEIGHT_PX,
+  CSV_VIRTUAL_SCROLL_BUFFER_PX,
+  CSV_VIRTUAL_SCROLL_BUFFER_ROWS,
+} from "../app/constants";
+
+import type { CsvSession } from "./csv-session";
+import { calculateColumnWindow, type CsvColumnWindow } from "./column-window";
+import { CsvRowWindowStore, type FetchCsvRows } from "./row-window-store";
+
+export class CsvGridVirtualizer {
+  private readonly refs: CsvPreviewGridRefs;
+  private readonly session: CsvSession;
+  private readonly rowHeightPx: number;
+  private readonly bufferRows: number;
+  private readonly columnBufferPx: number;
+  private readonly rowStore: CsvRowWindowStore;
+  private resizeObserver: ResizeObserver | null = null;
+  /** Coalesce scroll/resize storms to one paint-bound refresh. */
+  private rafHandle = 0;
+  /** Ignore stale IPC results when the user scrolls again before the round-trip finishes. */
+  private refreshGeneration = 0;
+  private lastScrollTop = 0;
+  private rowPool: HTMLDivElement[] = [];
+  private highlightedCell: { rowIndex: number; columnIndex: number } | null = null;
+
+  constructor(options: {
+    refs: CsvPreviewGridRefs;
+    session: CsvSession;
+    fetchRows: FetchCsvRows;
+    rowHeightPx?: number;
+    bufferRows?: number;
+    columnBufferPx?: number;
+  }) {
+    this.refs = options.refs;
+    this.session = options.session;
+    this.rowStore = new CsvRowWindowStore({ fetchRows: options.fetchRows });
+    this.rowHeightPx = options.rowHeightPx ?? CSV_ROW_HEIGHT_PX;
+    this.bufferRows = options.bufferRows ?? CSV_VIRTUAL_SCROLL_BUFFER_ROWS;
+    this.columnBufferPx = options.columnBufferPx ?? CSV_VIRTUAL_SCROLL_BUFFER_PX;
+  }
+
+  bind(): void {
+    const scroll = this.refs.scrollRegion;
+    scroll.onscroll = () => {
+      this.scheduleRefresh();
+    };
+
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = new ResizeObserver(() => {
+      this.scheduleRefresh();
+    });
+    this.resizeObserver.observe(scroll);
+  }
+
+  dispose(): void {
+    if (this.rafHandle !== 0) {
+      cancelAnimationFrame(this.rafHandle);
+      this.rafHandle = 0;
+    }
+
+    this.refs.scrollRegion.onscroll = null;
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    this.rowStore.clear();
+    this.rowPool = [];
+  }
+
+  updateAria(): void {
+    const { rowCount, headers } = this.session;
+    this.refs.scrollRegion.setAttribute("aria-rowcount", String(rowCount));
+    this.refs.scrollRegion.setAttribute("aria-colcount", String(headers.length));
+  }
+
+  reset(): void {
+    this.refreshGeneration++;
+    this.lastScrollTop = 0;
+    this.rowStore.clear();
+    this.refs.scrollRegion.scrollTop = 0;
+    this.refs.scrollRegion.scrollLeft = 0;
+    this.refs.headerRow.style.transform = "translateX(0px)";
+    this.refs.spacerTop.style.height = "0px";
+    this.refs.spacerBottom.style.height = "0px";
+    this.refs.windowRows.replaceChildren();
+    this.rowPool = [];
+    this.highlightedCell = null;
+  }
+
+  async scrollToCell(rowIndex: number, columnIndex: number): Promise<void> {
+    if (this.session.rowCount === 0 || this.session.headers.length === 0) {
+      return;
+    }
+
+    const safeRowIndex = Math.min(
+      Math.max(0, Math.floor(rowIndex)),
+      Math.max(0, this.session.rowCount - 1),
+    );
+    const safeColumnIndex = Math.min(
+      Math.max(0, Math.floor(columnIndex)),
+      Math.max(0, this.session.headers.length - 1),
+    );
+
+    this.highlightedCell = {
+      rowIndex: safeRowIndex,
+      columnIndex: safeColumnIndex,
+    };
+
+    this.refs.scrollRegion.scrollTop = this.getCenteredRowScrollTop(safeRowIndex);
+    this.refs.scrollRegion.scrollLeft = this.getCenteredColumnScrollLeft(safeColumnIndex);
+    this.lastScrollTop = this.refs.scrollRegion.scrollTop;
+
+    await this.refresh();
+    this.refs.scrollRegion.focus({ preventScroll: true });
+  }
+
+  scheduleRefresh(): void {
+    if (this.rafHandle !== 0) {
+      return;
+    }
+
+    this.rafHandle = requestAnimationFrame(() => {
+      this.rafHandle = 0;
+      void this.refresh();
+    });
+  }
+
+  isViewportPastRow(rowCount: number): boolean {
+    const firstVisibleRow = Math.max(
+      0,
+      Math.floor(this.refs.scrollRegion.scrollTop / this.rowHeightPx) - this.bufferRows,
+    );
+
+    return firstVisibleRow >= rowCount;
+  }
+
+  async refresh(): Promise<void> {
+    const generation = ++this.refreshGeneration;
+
+    const { spacerTop, spacerBottom, windowRows, scrollRegion } = this.refs;
+    const availableRowCount = this.session.rowCount;
+    const scrollRowCount = Math.max(
+      this.session.scrollRowCount,
+      availableRowCount === 0 ? 0 : 1,
+    );
+    const rowHeight = this.rowHeightPx;
+    const columnWindow = this.calculateColumnWindow();
+    this.syncHorizontalLayout(columnWindow);
+
+    if (scrollRowCount === 0) {
+      spacerTop.style.height = "0px";
+      spacerBottom.style.height = "0px";
+      windowRows.replaceChildren();
+      return;
+    }
+
+    const scrollTop = scrollRegion.scrollTop;
+    const viewport = scrollRegion.clientHeight;
+    const buf = this.bufferRows;
+    const scrollDirection = scrollTop >= this.lastScrollTop ? 1 : -1;
+    this.lastScrollTop = scrollTop;
+
+    const first = Math.max(0, Math.floor(scrollTop / rowHeight) - buf);
+    const lastExclusive = Math.min(
+      scrollRowCount,
+      Math.ceil((scrollTop + viewport) / rowHeight) + buf,
+    );
+    const fetchLastExclusive = Math.min(lastExclusive, availableRowCount);
+
+    spacerTop.style.height = `${first * rowHeight}px`;
+    spacerBottom.style.height = `${(scrollRowCount - lastExclusive) * rowHeight}px`;
+
+    const rawCount = fetchLastExclusive - first;
+    if (rawCount <= 0) {
+      windowRows.replaceChildren();
+      return;
+    }
+
+    try {
+      const columnCount = columnWindow.end - columnWindow.start;
+      const batch = await this.rowStore.getRows(
+        first,
+        rawCount,
+        availableRowCount,
+        columnWindow.start,
+        columnCount,
+      );
+      if (generation !== this.refreshGeneration) {
+        return;
+      }
+
+      const fragment = document.createDocumentFragment();
+      const colWidthsPx = this.session.colWidths;
+
+      for (let i = 0; i < batch.rows.length; i++) {
+        const rowIndex = batch.start + i;
+        const row = this.getReusableRow(i, {
+          rowIndex,
+          cells: batch.rows[i] ?? [],
+          cellsColumnStart: batch.column_start,
+          columnWindow,
+          colWidthsPx,
+          rowHeightPx: rowHeight,
+          highlightedCell: this.highlightedCell,
+        });
+
+        fragment.append(row);
+      }
+
+      windowRows.replaceChildren(fragment);
+      this.prefetchAdjacentRows(
+        scrollDirection,
+        first,
+        lastExclusive,
+        rawCount,
+        availableRowCount,
+        columnWindow,
+      );
+    } catch (err) {
+      if (generation === this.refreshGeneration) {
+        console.error(err);
+      }
+    }
+  }
+
+  private prefetchAdjacentRows(
+    scrollDirection: number,
+    first: number,
+    lastExclusive: number,
+    count: number,
+    rowCount: number,
+    columnWindow: CsvColumnWindow,
+  ): void {
+    if (count <= 0) {
+      return;
+    }
+
+    const prefetchStart =
+      scrollDirection >= 0 ? lastExclusive : Math.max(0, first - count);
+
+    this.rowStore.prefetchRows(
+      prefetchStart,
+      count,
+      rowCount,
+      columnWindow.start,
+      columnWindow.end - columnWindow.start,
+    );
+  }
+
+  private getReusableRow(
+    poolIndex: number,
+    options: Parameters<typeof createGridRow>[0],
+  ): HTMLDivElement {
+    const row = this.rowPool[poolIndex];
+    if (!row) {
+      const created = createGridRow(options);
+      this.rowPool[poolIndex] = created;
+      return created;
+    }
+
+    updateGridRow(row, options);
+    return row;
+  }
+
+  private calculateColumnWindow(): CsvColumnWindow {
+    return calculateColumnWindow({
+      colWidthsPx: this.session.colWidths,
+      scrollLeftPx: this.refs.scrollRegion.scrollLeft,
+      viewportWidthPx: this.refs.scrollRegion.clientWidth,
+      bufferPx: this.columnBufferPx,
+    });
+  }
+
+  private syncHorizontalLayout(columnWindow: CsvColumnWindow): void {
+    const width = `${columnWindow.totalWidthPx}px`;
+    this.refs.inner.style.width = width;
+    this.refs.headerRow.style.transform = `translateX(-${this.refs.scrollRegion.scrollLeft}px)`;
+
+    renderCsvHeaderRow(
+      this.refs.headerRow,
+      this.session.headers,
+      this.session.colWidths,
+      this.rowHeightPx,
+      columnWindow,
+    );
+  }
+
+  private getCenteredRowScrollTop(rowIndex: number): number {
+    const viewport = this.refs.scrollRegion.clientHeight;
+    const targetTop = rowIndex * this.rowHeightPx;
+    const centeredTop = targetTop - Math.max(0, (viewport - this.rowHeightPx) / 2);
+    const maxScrollTop = Math.max(0, this.session.rowCount * this.rowHeightPx - viewport);
+
+    return Math.min(Math.max(0, centeredTop), maxScrollTop);
+  }
+
+  private getCenteredColumnScrollLeft(columnIndex: number): number {
+    const columnLeft = this.getColumnOffsetPx(columnIndex);
+    const columnWidth = this.session.colWidths[columnIndex] ?? CSV_DEFAULT_COL_WIDTH_PX;
+    const totalWidth = this.session.colWidths.reduce(
+      (sum, width) => sum + (width || CSV_DEFAULT_COL_WIDTH_PX),
+      0,
+    );
+    const viewport = this.refs.scrollRegion.clientWidth;
+    const centeredLeft = columnLeft - Math.max(0, (viewport - columnWidth) / 2);
+    const maxScrollLeft = Math.max(0, totalWidth - viewport);
+
+    return Math.min(Math.max(0, centeredLeft), maxScrollLeft);
+  }
+
+  private getColumnOffsetPx(columnIndex: number): number {
+    let offset = 0;
+
+    for (let i = 0; i < columnIndex; i++) {
+      offset += this.session.colWidths[i] ?? CSV_DEFAULT_COL_WIDTH_PX;
+    }
+
+    return offset;
+  }
+}
