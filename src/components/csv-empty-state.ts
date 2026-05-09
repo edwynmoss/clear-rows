@@ -23,7 +23,7 @@ export function createCsvEmptyState(options: CsvEmptyStateOptions): CsvEmptyStat
 
   const blurb = document.createElement("p");
   blurb.className = "dp-empty-copy";
-  blurb.textContent = "Open a delimited file, or select a search set above.";
+  blurb.textContent = "Open a CSV, TSV, or delimited text file. You can also drop one here.";
 
   const actions = document.createElement("div");
   actions.className = "flex flex-wrap items-center justify-center gap-2 pt-1";

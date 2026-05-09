@@ -11,9 +11,18 @@ import type {
   RowBatch,
 } from "../types/csv";
 
-export async function openCsv(path: string): Promise<OpenSummary> {
+export type OpenCsvOptions = {
+  delimiterOverride?: string;
+  encodingOverride?: string;
+};
+
+export async function openCsv(path: string, options: OpenCsvOptions = {}): Promise<OpenSummary> {
   requireDesktopRuntime("Opening local CSV files requires the desktop runtime");
-  return invoke<OpenSummary>("open_csv", { path });
+  return invoke<OpenSummary>("open_csv", {
+    path,
+    delimiterOverride: options.delimiterOverride ?? null,
+    encodingOverride: options.encodingOverride ?? null,
+  });
 }
 
 export async function fetchCsvRows(

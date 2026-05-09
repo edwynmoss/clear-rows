@@ -1,7 +1,7 @@
 use super::parser::CsvUtf8Parser;
 use std::io::Cursor;
 
-const CANDIDATES: &[u8] = &[b',', b';', b'\t', b'|'];
+const CANDIDATES: &[u8] = &[b',', b';', b'\t', b'|', b':', b' '];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DelimiterConfidence {
@@ -136,11 +136,22 @@ fn score_delimiter(sample: &[u8], delimiter: u8) -> CandidateScore {
     let agreement = counts.iter().filter(|&&c| c == mode).count();
     let breadth = mode as i32 * 100;
     let anchor_penalty = (counts[0] as i32 - mode as i32).abs();
+    let agreement_ratio = agreement as f64 / counts.len() as f64;
+    let multi_ratio = multi_column_rows as f64 / counts.len() as f64;
+
+    // Use ratios rather than raw counts so a wrong delimiter that produces
+    // many spurious row splits cannot outrank a correct delimiter just because
+    // the wrong-delim parse drifted into more rows. Agreement is weighted most
+    // heavily because consistent column counts is the strongest signal of a
+    // real delimiter.
+    let score = (agreement_ratio * 100_000.0) as i32
+        + (multi_ratio * 50_000.0) as i32
+        + breadth
+        - anchor_penalty;
 
     CandidateScore {
         delimiter,
-        score: multi_column_rows as i32 * 20_000 + agreement as i32 * 10_000 + breadth
-            - anchor_penalty,
+        score,
         sampled_rows: counts.len(),
         mode_columns: mode,
         consistent_rows: agreement,
@@ -181,5 +192,59 @@ mod tests {
         let detection = detect_delimiter(sample.as_bytes());
         assert_eq!(detection.delimiter, b';');
         assert_eq!(detection.confidence, DelimiterConfidence::High);
+    }
+
+    #[test]
+    fn detects_colon_for_email_password_breach_dump() {
+        let sample = concat!(
+            "alice@example.com:hunter2\n",
+            "bob@example.com:correcthorse\n",
+            "carol@example.com:battery-staple\n",
+            "dan@example.com:p@ssw0rd!\n",
+        );
+        let detection = detect_delimiter(sample.as_bytes());
+        assert_eq!(detection.delimiter, b':');
+        assert_eq!(detection.confidence, DelimiterConfidence::High);
+        assert_eq!(detection.likely_columns, 2);
+    }
+
+    #[test]
+    fn detects_space_for_whitespace_separated_dump() {
+        let sample = concat!(
+            "alice@example.com hunter2\n",
+            "bob@example.com correcthorse\n",
+            "carol@example.com battery-staple\n",
+            "dan@example.com pass1234\n",
+        );
+        let detection = detect_delimiter(sample.as_bytes());
+        assert_eq!(detection.delimiter, b' ');
+        assert_eq!(detection.confidence, DelimiterConfidence::High);
+        assert_eq!(detection.likely_columns, 2);
+    }
+
+    #[test]
+    fn comma_csv_with_spaces_in_values_still_picks_comma() {
+        let sample = concat!(
+            "id,full_name,city\n",
+            "1,John Smith,Cape Town\n",
+            "2,Jane Doe,Port Elizabeth\n",
+            "3,Alex Brown,East London\n",
+        );
+        let detection = detect_delimiter(sample.as_bytes());
+        assert_eq!(detection.delimiter, b',');
+        assert_eq!(detection.likely_columns, 3);
+    }
+
+    #[test]
+    fn comma_csv_with_colons_in_timestamps_still_picks_comma() {
+        let sample = concat!(
+            "id,timestamp,label\n",
+            "1,12:34:56,alpha\n",
+            "2,13:45:01,beta\n",
+            "3,14:55:22,gamma\n",
+        );
+        let detection = detect_delimiter(sample.as_bytes());
+        assert_eq!(detection.delimiter, b',');
+        assert_eq!(detection.likely_columns, 3);
     }
 }

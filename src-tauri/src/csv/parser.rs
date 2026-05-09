@@ -150,6 +150,26 @@ impl<R: Read + Seek> CsvUtf8Parser<R> {
         Ok(true)
     }
 
+    /// Best-effort: try to make at least `n` bytes available at `pos`.
+    /// Returns true iff that succeeded; on EOF returns whatever's left.
+    fn ensure_n_bytes(&mut self, n: usize) -> std::io::Result<bool> {
+        while self.len - self.pos < n {
+            self.compact_if_needed();
+
+            if self.len == self.buf.len() {
+                break;
+            }
+
+            let read = self.stream.read(&mut self.buf[self.len..])?;
+            if read == 0 {
+                break;
+            }
+            self.len += read;
+        }
+
+        Ok(self.len - self.pos >= n)
+    }
+
     fn compact_if_needed(&mut self) {
         if self.pos == 0 {
             return;
@@ -291,6 +311,19 @@ impl<R: Read + Seek> CsvUtf8Parser<R> {
             return Ok(false);
         }
 
+        // Look ahead for \r\r\n, which appears in some Windows-encoded payloads
+        // (e.g. when CRLF text is re-translated LF→CRLF and the CR survives).
+        // Treat the whole sequence as one terminator so we don't emit a phantom
+        // empty row for the leading lone \r. Checked before \r\n / lone-\r.
+        self.ensure_n_bytes(3)?;
+        if self.pos + 2 < self.len
+            && self.buf[self.pos + 1] == b'\r'
+            && self.buf[self.pos + 2] == b'\n'
+        {
+            self.advance(3);
+            return Ok(true);
+        }
+
         self.advance(1);
 
         if self.pos < self.len {
@@ -313,5 +346,61 @@ impl<R: Read + Seek> CsvUtf8Parser<R> {
 
     fn advance(&mut self, count: usize) {
         self.pos = (self.pos + count).min(self.len);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn read_all(parser: &mut CsvUtf8Parser<Cursor<Vec<u8>>>) -> Vec<Vec<String>> {
+        let mut rows = Vec::new();
+        while let Some(row) = parser.try_read_row().expect("read row") {
+            rows.push(row);
+        }
+        rows
+    }
+
+    #[test]
+    fn parses_rows_terminated_by_crcrlf() {
+        let data = b"a,b,c\r\r\n1,2,3\r\r\n4,5,6\r\r\n";
+        let mut parser = CsvUtf8Parser::new(Cursor::new(data.to_vec()), b',').expect("parser");
+        let rows = read_all(&mut parser);
+        assert_eq!(
+            rows,
+            vec![
+                vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+                vec!["1".to_owned(), "2".to_owned(), "3".to_owned()],
+                vec!["4".to_owned(), "5".to_owned(), "6".to_owned()],
+            ]
+        );
+    }
+
+    #[test]
+    fn crcrlf_does_not_emit_phantom_empty_rows() {
+        // A naive lone-\r-then-\r\n parse would produce an empty row between
+        // each data row. The fix should yield exactly two rows here.
+        let data = b"h1,h2\r\r\nv1,v2\r\r\n";
+        let mut parser = CsvUtf8Parser::new(Cursor::new(data.to_vec()), b',').expect("parser");
+        let rows = read_all(&mut parser);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], vec!["h1".to_owned(), "h2".to_owned()]);
+        assert_eq!(rows[1], vec!["v1".to_owned(), "v2".to_owned()]);
+    }
+
+    #[test]
+    fn still_handles_plain_crlf_and_lone_cr() {
+        let data = b"a,b\r\n1,2\rX,Y\n";
+        let mut parser = CsvUtf8Parser::new(Cursor::new(data.to_vec()), b',').expect("parser");
+        let rows = read_all(&mut parser);
+        assert_eq!(
+            rows,
+            vec![
+                vec!["a".to_owned(), "b".to_owned()],
+                vec!["1".to_owned(), "2".to_owned()],
+                vec!["X".to_owned(), "Y".to_owned()],
+            ]
+        );
     }
 }

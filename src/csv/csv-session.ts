@@ -12,7 +12,12 @@ export class CsvSession {
   headers: string[] = [];
   /** Rows currently available from the Rust indexer. */
   rowCount = 0;
-  /** Rows exposed to the virtual scrollbar; updated less often to avoid thumb jitter. */
+  /**
+   * Rows exposed to the virtual scrollbar. Equal to the actual indexed row
+   * count — projecting toward an estimated final size made wheel ticks feel
+   * runaway on partially-indexed huge files because the scrollable extent was
+   * orders of magnitude larger than the rendered content.
+   */
   scrollRowCount = 0;
   colWidths: number[] = [];
 
@@ -21,7 +26,7 @@ export class CsvSession {
     this.profile = summary.profile;
     this.headers = summary.headers;
     this.rowCount = summary.row_count;
-    this.scrollRowCount = estimateScrollRowCount(summary);
+    this.scrollRowCount = summary.row_count;
     this.colWidths = summary.headers.map(() => colWidthPx);
   }
 
@@ -35,10 +40,7 @@ export class CsvSession {
 
     this.path = status.path;
     this.rowCount = status.row_count;
-
-    if (status.is_complete || status.error || status.row_count > this.scrollRowCount) {
-      this.scrollRowCount = status.row_count;
-    }
+    this.scrollRowCount = status.row_count;
 
     return {
       previousRowCount,
@@ -48,13 +50,3 @@ export class CsvSession {
   }
 }
 
-function estimateScrollRowCount(summary: OpenSummary): number {
-  if (summary.is_complete || summary.indexed_bytes <= 0 || summary.file_size <= 0) {
-    return summary.row_count;
-  }
-
-  const indexedRatio = summary.file_size / summary.indexed_bytes;
-  const estimatedRows = Math.ceil(summary.row_count * indexedRatio);
-
-  return Math.max(summary.row_count, estimatedRows);
-}

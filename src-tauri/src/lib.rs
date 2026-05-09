@@ -1,8 +1,8 @@
 mod csv;
 
 use csv::{
-    CsvDocument, CsvFileProfile, CsvSearchProgress, CsvSearchSummary, IndexStatus, OpenSummary,
-    RowBatch,
+    CsvDocument, CsvFileProfile, CsvSearchProgress, CsvSearchSummary, IndexStatus, OpenOptions,
+    OpenSummary, RowBatch,
 };
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -30,13 +30,27 @@ pub struct AppState {
 }
 
 #[tauri::command]
-async fn open_csv(path: String, state: State<'_, AppState>) -> Result<OpenSummary, String> {
+async fn open_csv(
+    path: String,
+    delimiter_override: Option<String>,
+    encoding_override: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<OpenSummary, String> {
     let document_state = Arc::clone(&state.document);
     let generation_state = Arc::clone(&state.index_generation);
     let generation = generation_state.fetch_add(1, Ordering::SeqCst) + 1;
 
+    let options = OpenOptions {
+        delimiter_override: delimiter_override
+            .as_deref()
+            .and_then(|value| value.chars().next())
+            .and_then(|c| u8::try_from(c as u32).ok()),
+        encoding_override,
+    };
+
     let (document, summary) = tauri::async_runtime::spawn_blocking(move || {
-        let document = CsvDocument::open_progressive(path, INITIAL_INDEX_ROWS)?;
+        let document =
+            CsvDocument::open_progressive_with_options(path, INITIAL_INDEX_ROWS, options)?;
         let summary = document.summarize();
         Ok::<_, csv::CsvError>((document, summary))
     })

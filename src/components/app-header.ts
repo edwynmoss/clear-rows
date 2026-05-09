@@ -12,6 +12,7 @@ export type AppHeaderOptions = {
 export type AppHeader = {
   readonly root: HTMLElement;
   readonly openButton: HTMLButtonElement;
+  setSubtitleVisible(visible: boolean): void;
 };
 
 export function createAppHeader(options: AppHeaderOptions): AppHeader {
@@ -77,5 +78,11 @@ export function createAppHeader(options: AppHeaderOptions): AppHeader {
   inner.append(brandBlock, actions);
   header.append(inner);
 
-  return { root: header, openButton };
+  return {
+    root: header,
+    openButton,
+    setSubtitleVisible(visible: boolean) {
+      subtitleEl.classList.toggle("hidden", !visible);
+    },
+  };
 }

@@ -1,21 +1,5 @@
 export type StatusTone = "neutral" | "busy" | "positive" | "warning" | "negative";
 
-const toneRing: Record<StatusTone, string> = {
-  neutral: "ring-transparent",
-  busy: "ring-transparent",
-  positive: "ring-transparent",
-  warning: "ring-transparent",
-  negative: "ring-transparent",
-};
-
-const toneBorder: Record<StatusTone, string> = {
-  neutral: "border-border",
-  busy: "border-border",
-  positive: "border-border",
-  warning: "border-border",
-  negative: "border-danger/45",
-};
-
 export type StatusBanner = {
   readonly element: HTMLDivElement;
   setText(text: string, tone?: StatusTone): void;
@@ -35,10 +19,12 @@ export function createStatusBanner(initial = "", tone: StatusTone = "neutral"): 
   function applyChrome(el: HTMLDivElement, t: StatusTone, hasText: boolean) {
     if (!hasText) {
       el.className = "hidden";
+      el.removeAttribute("data-tone");
       return;
     }
 
-    el.className = ["dp-status transition-[border-color,box-shadow] duration-200", toneBorder[t], toneRing[t]].join(" ");
+    el.className = "dp-status transition-[border-color,background-color,box-shadow] duration-200";
+    el.dataset.tone = t;
   }
 
   function setElementText(text: string, nextTone: StatusTone) {
