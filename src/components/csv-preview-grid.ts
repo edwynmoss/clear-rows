@@ -1,5 +1,6 @@
 import { CSV_DEFAULT_COL_WIDTH_PX } from "../app/constants";
 import type { CsvColumnWindow } from "../csv/column-window";
+import type { ActiveSort } from "../csv/csv-session";
 
 export type CsvPreviewGridRefs = {
   readonly root: HTMLDivElement;
@@ -67,6 +68,13 @@ export function createCsvPreviewGrid(options: CsvPreviewGridOptions = {}): CsvPr
   };
 }
 
+export type RenderHeaderOptions = {
+  /** Active sort state to render as an arrow indicator on the matching column. */
+  activeSort?: ActiveSort | null;
+  /** Column whose sort is currently being computed. Rendered with a busy hint. */
+  pendingSortColumn?: number | null;
+};
+
 export function renderCsvHeaderRow(
   headerRow: HTMLDivElement,
   headers: string[],
@@ -82,6 +90,7 @@ export function renderCsvHeaderRow(
       0,
     ),
   },
+  options: RenderHeaderOptions = {},
 ): void {
   headerRow.replaceChildren();
   headerRow.style.width = `${columnWindow.totalWidthPx}px`;
@@ -93,11 +102,45 @@ export function renderCsvHeaderRow(
     cell.role = "columnheader";
     cell.setAttribute("aria-colindex", String(i + 1));
     cell.className = "dp-grid-header-cell";
+    cell.dataset.columnIndex = String(i);
     const w = colWidthsPx[i] ?? CSV_DEFAULT_COL_WIDTH_PX;
     cell.style.width = `${w}px`;
     cell.style.minWidth = `${w}px`;
     cell.style.height = `${rowHeightPx}px`;
-    cell.textContent = headers[i] ?? "";
+
+    const label = document.createElement("span");
+    label.className = "dp-grid-header-label";
+    label.textContent = headers[i] ?? "";
+    cell.append(label);
+
+    const isPending = options.pendingSortColumn === i;
+    const direction =
+      options.activeSort?.column === i && !isPending ? options.activeSort.direction : null;
+
+    if (isPending || direction !== null) {
+      const indicator = document.createElement("span");
+      indicator.className = "dp-grid-header-sort";
+      indicator.setAttribute("aria-hidden", "true");
+      if (isPending) {
+        indicator.dataset.state = "pending";
+        indicator.textContent = "…";
+      } else {
+        indicator.dataset.state = direction ?? "";
+        indicator.textContent = direction === "asc" ? "▲" : "▼";
+      }
+      cell.append(indicator);
+    }
+
+    if (isPending) {
+      cell.setAttribute("aria-sort", "other");
+    } else if (direction === "asc") {
+      cell.setAttribute("aria-sort", "ascending");
+    } else if (direction === "desc") {
+      cell.setAttribute("aria-sort", "descending");
+    } else {
+      cell.setAttribute("aria-sort", "none");
+    }
+
     headerRow.append(cell);
   }
 

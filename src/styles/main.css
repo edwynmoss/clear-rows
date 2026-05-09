@@ -871,12 +871,60 @@
     align-items: center;
     border-right: 1px solid color-mix(in oklab, var(--semantic-border), transparent 20%);
     color: var(--semantic-text-muted);
+    cursor: pointer;
     display: flex;
     font-size: 0.68rem;
     font-weight: 720;
+    gap: 0.4rem;
+    justify-content: space-between;
     letter-spacing: 0;
     padding-inline: 0.75rem;
     text-transform: uppercase;
+    user-select: none;
+  }
+
+  .dp-grid-header-cell:hover {
+    background: color-mix(in oklab, var(--semantic-accent-soft), transparent 60%);
+    color: var(--semantic-text);
+  }
+
+  .dp-grid-header-cell[aria-sort="ascending"],
+  .dp-grid-header-cell[aria-sort="descending"] {
+    color: var(--semantic-text);
+  }
+
+  .dp-grid-header-cell[aria-sort="other"] {
+    color: var(--semantic-text);
+    opacity: 0.85;
+  }
+
+  .dp-grid-header-label {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dp-grid-header-sort {
+    color: var(--semantic-accent);
+    flex: 0 0 auto;
+    font-size: 0.7rem;
+    line-height: 1;
+  }
+
+  .dp-grid-header-sort[data-state="pending"] {
+    animation: dp-grid-header-sort-pending 1.2s ease-in-out infinite;
+    color: var(--semantic-text-muted);
+  }
+
+  @keyframes dp-grid-header-sort-pending {
+    0%,
+    100% {
+      opacity: 0.4;
+    }
+    50% {
+      opacity: 1;
+    }
   }
 
   .dp-status {

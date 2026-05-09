@@ -92,3 +92,15 @@ export type CsvSearchFileError = {
   path: string;
   message: string;
 };
+
+export type SortDirection = "asc" | "desc";
+
+export type SortStatus = {
+  is_sorting: boolean;
+  is_ready: boolean;
+  column: number | null;
+  direction: SortDirection | null;
+  rows_scanned: number;
+  total_rows: number;
+  error: string | null;
+};

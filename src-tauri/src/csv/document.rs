@@ -76,6 +76,12 @@ pub struct RowBatch {
 
 pub struct CsvDocument {
     path: PathBuf,
+    /// Path the parser/indexer/sort actually reads from. For UTF-8 sources this
+    /// equals `path`; for UTF-16 sources it points at the transcoded UTF-8
+    /// cache file held alive by `cache_guard`.
+    read_path: PathBuf,
+    /// Byte offset within `read_path` where the CSV data (header row) starts.
+    read_data_start: u64,
     delimiter: u8,
     profile: CsvFileProfile,
     block_starts: Vec<u64>,
@@ -191,6 +197,8 @@ impl CsvDocument {
 
         let mut document = Self {
             path,
+            read_path,
+            read_data_start,
             delimiter,
             profile: profiled.profile,
             block_starts,
@@ -237,6 +245,18 @@ impl CsvDocument {
 
     pub fn data_row_count(&self) -> u64 {
         self.physical_rows.saturating_sub(1)
+    }
+
+    pub fn delimiter(&self) -> u8 {
+        self.delimiter
+    }
+
+    pub fn read_path(&self) -> &Path {
+        &self.read_path
+    }
+
+    pub fn read_data_start(&self) -> u64 {
+        self.read_data_start
     }
 
     pub fn is_indexing_complete(&self) -> bool {
@@ -356,6 +376,67 @@ impl CsvDocument {
         })
     }
 
+    /// Read rows by physical data-row index (0-based, header excluded). Used
+    /// by sorted/filtered fetches where consecutive sorted indices may map to
+    /// arbitrary positions in the underlying file.
+    pub fn get_rows_at_physical_data_indices(
+        &mut self,
+        sorted_start: u64,
+        physical_indices: &[u64],
+        column_start: usize,
+        column_count: usize,
+    ) -> Result<RowBatch, CsvError> {
+        if physical_indices.len() > MAX_ROWS_PER_BATCH {
+            return Err(CsvError::BatchTooLarge);
+        }
+
+        let header_len = self.headers.len();
+        let safe_column_start = column_start.min(header_len);
+        let visible_column_count = column_count.min(header_len.saturating_sub(safe_column_start));
+
+        if physical_indices.is_empty() {
+            return Ok(RowBatch {
+                start: sorted_start,
+                column_start: safe_column_start,
+                rows: Vec::new(),
+            });
+        }
+
+        let max_data = self.data_row_count();
+        let mut rows = Vec::with_capacity(physical_indices.len());
+
+        for &phys in physical_indices {
+            if phys >= max_data {
+                // Index points past what's currently indexed. Emit a blank
+                // placeholder rather than failing the whole batch — the
+                // virtualizer asks for windows that may straddle the indexed
+                // edge during progressive opens.
+                rows.push(blank_row(visible_column_count));
+                continue;
+            }
+
+            let physical_row = phys.saturating_add(1);
+            self.seek_before_physical_row(physical_row)?;
+
+            let row = match self.parser.try_read_row()? {
+                Some(r) => r,
+                None => return Err(CsvError::MissingRow),
+            };
+
+            rows.push(preview_sliced_row(
+                row,
+                safe_column_start,
+                visible_column_count,
+            ));
+        }
+
+        Ok(RowBatch {
+            start: sorted_start,
+            column_start: safe_column_start,
+            rows,
+        })
+    }
+
     #[cfg(test)]
     fn cache_path(&self) -> Option<PathBuf> {
         self.cache_guard.as_ref().map(|g| g.path.clone())
@@ -378,6 +459,10 @@ impl CsvDocument {
 
         Ok(())
     }
+}
+
+fn blank_row(column_count: usize) -> Vec<String> {
+    (0..column_count).map(|_| String::new()).collect()
 }
 
 fn preview_sliced_row(row: Vec<String>, column_start: usize, column_count: usize) -> Vec<String> {
