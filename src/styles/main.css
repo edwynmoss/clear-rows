@@ -188,6 +188,98 @@
     justify-content: flex-end;
   }
 
+  .dp-reopen {
+    position: relative;
+  }
+
+  .dp-reopen-trigger {
+    font-size: 0.78rem;
+    padding-inline: 0.7rem;
+  }
+
+  .dp-reopen-panel {
+    background: var(--semantic-surface);
+    border: 1px solid color-mix(in oklab, var(--semantic-border), transparent 8%);
+    border-radius: 0.55rem;
+    box-shadow:
+      0 12px 30px rgb(0 0 0 / 0.18),
+      0 1px 1px rgb(0 0 0 / 0.14);
+    display: grid;
+    gap: 0.6rem;
+    min-width: 14rem;
+    padding: 0.7rem;
+    position: absolute;
+    right: 0;
+    top: calc(100% + 0.4rem);
+    z-index: 40;
+  }
+
+  .dp-reopen-field {
+    display: grid;
+    gap: 0.25rem;
+  }
+
+  .dp-reopen-field-label {
+    color: var(--semantic-text-muted);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0;
+    text-transform: uppercase;
+  }
+
+  .dp-reopen-select {
+    background: color-mix(in oklab, var(--semantic-background), black 2%);
+    border: 1px solid var(--semantic-border);
+    border-radius: 0.4rem;
+    color: var(--semantic-text-primary);
+    font-size: 0.82rem;
+    height: 2.1rem;
+    padding-inline: 0.55rem;
+  }
+
+  .dp-reopen-select:focus {
+    border-color: color-mix(in oklab, var(--semantic-accent), var(--semantic-border) 15%);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--semantic-accent), transparent 84%);
+    outline: none;
+  }
+
+  .dp-reopen-actions {
+    display: flex;
+    gap: 0.4rem;
+    justify-content: flex-end;
+    padding-top: 0.15rem;
+  }
+
+  .dp-reopen-actions .dp-button {
+    font-size: 0.78rem;
+    height: 2rem;
+    padding-inline: 0.7rem;
+  }
+
+  .dp-progress-strip {
+    background: transparent;
+    height: 2px;
+    overflow: hidden;
+    width: 100%;
+  }
+
+  .dp-progress-strip[data-state="idle"] {
+    visibility: hidden;
+  }
+
+  .dp-progress-strip-fill {
+    background: var(--semantic-accent);
+    height: 100%;
+    transition:
+      width 240ms ease,
+      opacity 240ms ease;
+    width: 0%;
+  }
+
+  .dp-progress-strip[data-state="complete"] .dp-progress-strip-fill {
+    opacity: 0;
+  }
+
   .dp-shell-main {
     display: flex;
     flex: 1;
@@ -522,6 +614,18 @@
     justify-content: center;
     min-height: min(430px, 54vh);
     padding: 2rem;
+    transition:
+      background-color 160ms ease,
+      border-color 160ms ease,
+      box-shadow 160ms ease;
+  }
+
+  .dp-empty-state[data-drag-over="true"] {
+    background: color-mix(in oklab, var(--semantic-accent-soft), var(--semantic-surface) 50%);
+    border-color: color-mix(in oklab, var(--semantic-accent), transparent 38%);
+    box-shadow:
+      var(--shadow-card),
+      inset 0 0 0 1px color-mix(in oklab, var(--semantic-accent), transparent 55%);
   }
 
   .dp-empty-content {
@@ -685,6 +789,12 @@
 
   .dp-grid-scroll {
     scrollbar-gutter: stable;
+    /* Belt-and-suspenders for the WebView2 scroll-inertia / smooth-scroll
+       feature that animates wheel input into a constant-velocity fling and
+       doesn't stop until end of content — see additionalBrowserArgs in
+       tauri.conf.json. */
+    scroll-behavior: auto;
+    overflow-anchor: none;
   }
 
   .dp-results-rows {
@@ -772,11 +882,32 @@
   .dp-status {
     background: color-mix(in oklab, var(--semantic-surface), var(--semantic-background) 30%);
     border: 1px solid color-mix(in oklab, var(--semantic-border), transparent 38%);
+    border-left: 3px solid var(--semantic-border);
     border-radius: 0.375rem;
     color: var(--semantic-text-muted);
     font-size: 0.73rem;
     line-height: 1.32;
     padding: 0.45rem 0.65rem;
+  }
+
+  .dp-status[data-tone="busy"] {
+    border-left-color: var(--semantic-accent);
+    background: color-mix(in oklab, var(--semantic-accent-soft), var(--semantic-surface) 60%);
+  }
+
+  .dp-status[data-tone="positive"] {
+    border-left-color: var(--semantic-accent);
+  }
+
+  .dp-status[data-tone="warning"] {
+    border-left-color: var(--semantic-warning);
+    background: color-mix(in oklab, var(--semantic-warning), var(--semantic-surface) 88%);
+  }
+
+  .dp-status[data-tone="negative"] {
+    border-color: color-mix(in oklab, var(--semantic-danger), transparent 55%);
+    border-left-color: var(--semantic-danger);
+    background: color-mix(in oklab, var(--semantic-danger), var(--semantic-surface) 88%);
   }
 
   .dp-status-content {
@@ -817,6 +948,19 @@
     border: 0;
     border-radius: 0;
     padding: 0;
+  }
+
+  .dp-status[data-placement="footer"][data-tone="busy"] .dp-status-primary,
+  .dp-status[data-placement="footer"][data-tone="positive"] .dp-status-primary {
+    color: var(--semantic-accent);
+  }
+
+  .dp-status[data-placement="footer"][data-tone="warning"] .dp-status-primary {
+    color: var(--semantic-warning);
+  }
+
+  .dp-status[data-placement="footer"][data-tone="negative"] .dp-status-primary {
+    color: var(--semantic-danger);
   }
 
   .dp-status[data-placement="footer"] .dp-status-content {

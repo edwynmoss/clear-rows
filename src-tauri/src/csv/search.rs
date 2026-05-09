@@ -258,7 +258,7 @@ fn search_one_file(
     let profiled = profile_csv_path(&path)?;
     if profiled.profile.binary_like {
         return Err(CsvSearchError::UnsupportedFile(
-            "binary-looking content is not supported".to_owned(),
+            "File appears to be binary or uses an unsupported encoding".to_owned(),
         ));
     }
 

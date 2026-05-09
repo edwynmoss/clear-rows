@@ -48,6 +48,7 @@ export class CsvGridVirtualizer {
     scroll.onscroll = () => {
       this.scheduleRefresh();
     };
+    scroll.addEventListener("wheel", this.handleWheel, { passive: false });
 
     this.resizeObserver?.disconnect();
     this.resizeObserver = new ResizeObserver(() => {
@@ -56,6 +57,20 @@ export class CsvGridVirtualizer {
     this.resizeObserver.observe(scroll);
   }
 
+  private readonly handleWheel = (event: WheelEvent): void => {
+    if (event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) {
+      return;
+    }
+    if (event.deltaY === 0 && event.deltaX === 0) return;
+
+    event.preventDefault();
+    const scroll = this.refs.scrollRegion;
+    const dy = normalizeWheelDelta(event.deltaY, event.deltaMode, this.rowHeightPx);
+    const dx = normalizeWheelDelta(event.deltaX, event.deltaMode, this.rowHeightPx);
+    scroll.scrollTop += dy;
+    scroll.scrollLeft += dx;
+  };
+
   dispose(): void {
     if (this.rafHandle !== 0) {
       cancelAnimationFrame(this.rafHandle);
@@ -63,6 +78,7 @@ export class CsvGridVirtualizer {
     }
 
     this.refs.scrollRegion.onscroll = null;
+    this.refs.scrollRegion.removeEventListener("wheel", this.handleWheel);
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.rowStore.clear();
@@ -318,5 +334,21 @@ export class CsvGridVirtualizer {
     }
 
     return offset;
+  }
+}
+
+/**
+ * Convert a WheelEvent delta to pixels. WheelEvent.deltaMode reports the unit:
+ * 0 = pixel, 1 = line, 2 = page. Most modern browsers send pixel mode, but
+ * older Firefox / some custom drivers still emit line mode.
+ */
+function normalizeWheelDelta(delta: number, mode: number, rowHeightPx: number): number {
+  switch (mode) {
+    case 1:
+      return delta * rowHeightPx;
+    case 2:
+      return delta * rowHeightPx * 16;
+    default:
+      return delta;
   }
 }
