@@ -67,6 +67,7 @@ export function updateGridRow(rowEl: HTMLDivElement, options: GridRowOptions): v
     cell.style.width = `${width}px`;
     cell.style.minWidth = `${width}px`;
     cell.setAttribute("aria-colindex", String(columnIndex + 1));
+    cell.dataset.columnIndex = String(columnIndex);
     cell.toggleAttribute("aria-selected", isHighlightedCell);
 
     if (cell.textContent !== text) {
