@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "clear-rows"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "encoding_rs",
  "encoding_rs_io",
