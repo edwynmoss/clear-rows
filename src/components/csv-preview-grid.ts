@@ -98,12 +98,17 @@ export function renderCsvHeaderRow(
   headerRow.append(createHeaderSpacer(columnWindow.leftOffsetPx));
 
   for (let i = columnWindow.start; i < columnWindow.end; i++) {
+    const w = colWidthsPx[i] ?? CSV_DEFAULT_COL_WIDTH_PX;
+    if (w <= 0) {
+      // Hidden columns fold to zero width; don't emit a header cell.
+      continue;
+    }
+
     const cell = document.createElement("div");
     cell.role = "columnheader";
     cell.setAttribute("aria-colindex", String(i + 1));
     cell.className = "dp-grid-header-cell";
     cell.dataset.columnIndex = String(i);
-    const w = colWidthsPx[i] ?? CSV_DEFAULT_COL_WIDTH_PX;
     cell.style.width = `${w}px`;
     cell.style.minWidth = `${w}px`;
     cell.style.height = `${rowHeightPx}px`;

@@ -210,7 +210,7 @@ export class CsvGridVirtualizer {
       }
 
       const fragment = document.createDocumentFragment();
-      const colWidthsPx = this.session.colWidths;
+      const colWidthsPx = this.session.effectiveColWidths();
 
       for (let i = 0; i < batch.rows.length; i++) {
         const rowIndex = batch.start + i;
@@ -284,7 +284,7 @@ export class CsvGridVirtualizer {
 
   private calculateColumnWindow(): CsvColumnWindow {
     return calculateColumnWindow({
-      colWidthsPx: this.session.colWidths,
+      colWidthsPx: this.session.effectiveColWidths(),
       scrollLeftPx: this.refs.scrollRegion.scrollLeft,
       viewportWidthPx: this.refs.scrollRegion.clientWidth,
       bufferPx: this.columnBufferPx,
@@ -338,10 +338,11 @@ export class CsvGridVirtualizer {
   }
 
   private getCenteredColumnScrollLeft(columnIndex: number): number {
-    const columnLeft = this.getColumnOffsetPx(columnIndex);
-    const columnWidth = this.session.colWidths[columnIndex] ?? CSV_DEFAULT_COL_WIDTH_PX;
-    const totalWidth = this.session.colWidths.reduce(
-      (sum, width) => sum + (width || CSV_DEFAULT_COL_WIDTH_PX),
+    const widths = this.session.effectiveColWidths();
+    const columnLeft = this.getColumnOffsetPx(columnIndex, widths);
+    const columnWidth = widths[columnIndex] ?? CSV_DEFAULT_COL_WIDTH_PX;
+    const totalWidth = widths.reduce(
+      (sum, width) => sum + width,
       0,
     );
     const viewport = this.refs.scrollRegion.clientWidth;
@@ -351,11 +352,11 @@ export class CsvGridVirtualizer {
     return Math.min(Math.max(0, centeredLeft), maxScrollLeft);
   }
 
-  private getColumnOffsetPx(columnIndex: number): number {
+  private getColumnOffsetPx(columnIndex: number, widths: number[]): number {
     let offset = 0;
 
     for (let i = 0; i < columnIndex; i++) {
-      offset += this.session.colWidths[i] ?? CSV_DEFAULT_COL_WIDTH_PX;
+      offset += widths[i] ?? CSV_DEFAULT_COL_WIDTH_PX;
     }
 
     return offset;

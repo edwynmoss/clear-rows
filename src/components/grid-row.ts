@@ -40,13 +40,22 @@ export function updateGridRow(rowEl: HTMLDivElement, options: GridRowOptions): v
   rowEl.setAttribute("aria-rowindex", String(options.rowIndex + 1));
   rowEl.dataset.rowIndex = String(options.rowIndex);
 
-  const visibleColumnCount = options.columnWindow.end - options.columnWindow.start;
-  ensureCellCount(rowEl, visibleColumnCount);
+  // Build the list of physical column indices to render: every column inside
+  // the window with non-zero width (hidden columns fold to width 0).
+  const visibleColumns: number[] = [];
+  for (let i = options.columnWindow.start; i < options.columnWindow.end; i++) {
+    const width = options.colWidthsPx[i] ?? CSV_DEFAULT_COL_WIDTH_PX;
+    if (width > 0) {
+      visibleColumns.push(i);
+    }
+  }
+
+  ensureCellCount(rowEl, visibleColumns.length);
   updateSpacer(rowEl.firstElementChild as HTMLDivElement, options.columnWindow.leftOffsetPx);
   updateSpacer(rowEl.lastElementChild as HTMLDivElement, options.columnWindow.rightOffsetPx);
 
-  for (let i = 0; i < visibleColumnCount; i++) {
-    const columnIndex = options.columnWindow.start + i;
+  for (let i = 0; i < visibleColumns.length; i++) {
+    const columnIndex = visibleColumns[i];
     const cell = rowEl.children.item(i + 1) as HTMLDivElement;
     const width = options.colWidthsPx[columnIndex] ?? CSV_DEFAULT_COL_WIDTH_PX;
     const text = options.cells[columnIndex - options.cellsColumnStart] ?? "";
