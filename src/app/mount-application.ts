@@ -5,6 +5,7 @@ import { createCsvEmptyState } from "../components/csv-empty-state";
 import { createCsvFilterBar } from "../components/csv-filter-bar";
 import { createCsvPreviewGrid } from "../components/csv-preview-grid";
 import { createCsvSearchPanel } from "../components/csv-search-panel";
+import { createExportButton } from "../components/export-button";
 import { createReopenAsControl } from "../components/reopen-as-control";
 import { createSearchResultsTable } from "../components/search-results-table";
 import { createThemeToggle } from "../components/theme-toggle";
@@ -24,16 +25,19 @@ import type {
   CsvFileProfileResult,
   CsvSearchMatch,
   CsvSearchProgress,
+  ExportStatus,
   FilterStatus,
   SortDirection,
   SortStatus,
 } from "../types/csv";
+import { save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 const JUMP_POLL_INTERVAL_MS = 200;
 const SEARCH_PROGRESS_POLL_INTERVAL_MS = 200;
 const SORT_PROGRESS_POLL_INTERVAL_MS = 250;
 const FILTER_PROGRESS_POLL_INTERVAL_MS = 250;
+const EXPORT_PROGRESS_POLL_INTERVAL_MS = 250;
 
 export function mountApplication(host: HTMLElement): void {
   const hasDesktopRuntime = isDesktopRuntime();
@@ -76,6 +80,7 @@ export function mountApplication(host: HTMLElement): void {
   let resultJumpGeneration = 0;
   let sortGeneration = 0;
   let filterGeneration = 0;
+  let exportGeneration = 0;
 
   const searchPanel = createCsvSearchPanel({
     initialLimit: getStoredSearchLimit(),
@@ -100,6 +105,12 @@ export function mountApplication(host: HTMLElement): void {
   const reopenAsControl = createReopenAsControl({
     onApply: ({ delimiter, encoding }) => {
       void runReopenAs(delimiter, encoding);
+    },
+  });
+
+  const exportButton = createExportButton({
+    onClick: () => {
+      void runExportFlow();
     },
   });
 
@@ -369,6 +380,124 @@ export function mountApplication(host: HTMLElement): void {
     return `Sorting by ${columnName} · ${rows} rows scanned…`;
   }
 
+  async function runExportFlow(): Promise<void> {
+    if (!session.path || isOpening) {
+      return;
+    }
+
+    const defaultName = suggestExportFileName(session.path, session.activeFilter, session.activeSort);
+    let target: string | null;
+    try {
+      target = await save({
+        defaultPath: defaultName,
+        filters: [{ name: "CSV", extensions: ["csv"] }],
+      });
+    } catch (err) {
+      shell.status.setText(`Export dialog error: ${formatError(err)}`, "negative");
+      return;
+    }
+    if (!target) {
+      return;
+    }
+
+    const generation = ++exportGeneration;
+    exportButton.setBusy(true);
+    shell.status.setText("Preparing export…", "busy");
+
+    let initial: ExportStatus;
+    try {
+      initial = await csvApi.startCsvExport(target);
+    } catch (err) {
+      if (generation === exportGeneration) {
+        exportButton.setBusy(false);
+        shell.status.setText(`Export error: ${formatError(err)}`, "negative");
+      }
+      return;
+    }
+
+    if (generation !== exportGeneration) {
+      return;
+    }
+
+    if (initial.error) {
+      exportButton.setBusy(false);
+      shell.status.setText(`Export error: ${initial.error}`, "negative");
+      return;
+    }
+
+    shell.status.setText(formatExportProgress(initial), "busy");
+    await pollExportStatus(generation, target);
+  }
+
+  async function pollExportStatus(generation: number, target: string): Promise<void> {
+    while (generation === exportGeneration) {
+      await wait(EXPORT_PROGRESS_POLL_INTERVAL_MS);
+
+      let status: ExportStatus;
+      try {
+        status = await csvApi.getCsvExportStatus();
+      } catch (err) {
+        if (generation === exportGeneration) {
+          exportButton.setBusy(false);
+          shell.status.setText(`Export status error: ${formatError(err)}`, "negative");
+        }
+        return;
+      }
+
+      if (generation !== exportGeneration) {
+        return;
+      }
+
+      if (status.error) {
+        exportButton.setBusy(false);
+        shell.status.setText(`Export error: ${status.error}`, "negative");
+        return;
+      }
+
+      if (status.is_complete && !status.is_running) {
+        exportButton.setBusy(false);
+        const rows = status.rows_written.toLocaleString();
+        shell.status.setText(`Exported ${rows} rows to ${target}.`, "positive");
+        return;
+      }
+
+      if (!status.is_running && !status.is_complete) {
+        // Cancelled or never started.
+        exportButton.setBusy(false);
+        shell.status.setText("Export cancelled.", "neutral");
+        return;
+      }
+
+      shell.status.setText(formatExportProgress(status), "busy");
+    }
+  }
+
+  function formatExportProgress(status: ExportStatus): string {
+    const written = status.rows_written.toLocaleString();
+    if (status.total_rows > 0) {
+      const total = status.total_rows.toLocaleString();
+      const pct = Math.min(100, Math.floor((status.rows_written / status.total_rows) * 100));
+      return `Exporting · ${written} of ${total} rows (${pct}%)…`;
+    }
+    return `Exporting · ${written} rows…`;
+  }
+
+  function suggestExportFileName(
+    sourcePath: string,
+    filter: { query: string } | null,
+    sort: { column: number; direction: SortDirection } | null,
+  ): string {
+    const sep = sourcePath.includes("\\") ? "\\" : "/";
+    const base = sourcePath.split(sep).pop() ?? "export.csv";
+    const dot = base.lastIndexOf(".");
+    const stem = dot > 0 ? base.slice(0, dot) : base;
+    const tags: string[] = [];
+    if (filter) tags.push("filtered");
+    if (sort) tags.push(`sorted-${sort.direction}`);
+    const suffix = tags.length > 0 ? `-${tags.join("-")}` : "-export";
+    return `${stem}${suffix}.csv`;
+  }
+
   async function runReopenAs(delimiter: string, encoding: string): Promise<void> {
     if (!session.path || isOpening) {
       return;
@@ -377,6 +506,7 @@ export function mountApplication(host: HTMLElement): void {
     resultJumpGeneration++;
     sortGeneration++;
     filterGeneration++;
+    exportGeneration++;
     virtualizer.setPendingSortColumn(null);
     isOpening = true;
     try {
@@ -428,6 +558,8 @@ export function mountApplication(host: HTMLElement): void {
       filterBar.setStatus("");
       filterBar.setActiveQuery(null);
       filterBar.setVisible(true);
+      exportButton.setBusy(false);
+      exportButton.setEnabled(true);
       return;
     }
 
@@ -436,6 +568,7 @@ export function mountApplication(host: HTMLElement): void {
     shell.setSubtitleVisible(true);
     reopenAsControl.setEnabled(false);
     filterBar.setVisible(false);
+    exportButton.setEnabled(false);
   }
 
   function revealSearchResults(): void {
@@ -443,6 +576,7 @@ export function mountApplication(host: HTMLElement): void {
     grid.root.classList.add("hidden");
     searchResults.root.classList.remove("hidden");
     filterBar.setVisible(false);
+    exportButton.setEnabled(false);
   }
 
   async function runOpenFlow(): Promise<void> {
@@ -453,6 +587,7 @@ export function mountApplication(host: HTMLElement): void {
     resultJumpGeneration++;
     sortGeneration++;
     filterGeneration++;
+    exportGeneration++;
     virtualizer.setPendingSortColumn(null);
     isOpening = true;
     try {
@@ -473,6 +608,8 @@ export function mountApplication(host: HTMLElement): void {
       }
 
       sortGeneration++;
+      filterGeneration++;
+      exportGeneration++;
       virtualizer.setPendingSortColumn(null);
       isOpening = true;
       try {
@@ -650,6 +787,8 @@ export function mountApplication(host: HTMLElement): void {
     try {
       if (session.path !== match.path) {
         sortGeneration++;
+        filterGeneration++;
+        exportGeneration++;
         virtualizer.setPendingSortColumn(null);
         isOpening = true;
         shell.status.setText(
@@ -802,7 +941,7 @@ export function mountApplication(host: HTMLElement): void {
     subtitle: "Large-file preview and search",
     version: __APP_VERSION__,
     footerTagline: "Local desktop",
-    headerExtras: [reopenAsControl.root, createThemeToggle()],
+    headerExtras: [reopenAsControl.root, exportButton.root, createThemeToggle()],
     onOpenCsv: () => {
       void runOpenFlow();
     },
@@ -872,6 +1011,8 @@ export function mountApplication(host: HTMLElement): void {
 
       resultJumpGeneration++;
       sortGeneration++;
+      filterGeneration++;
+      exportGeneration++;
       virtualizer.setPendingSortColumn(null);
       isOpening = true;
       (async () => {

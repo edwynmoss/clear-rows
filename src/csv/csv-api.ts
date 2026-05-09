@@ -6,6 +6,7 @@ import type {
   CsvFileProfileResult,
   CsvSearchProgress,
   CsvSearchSummary,
+  ExportStatus,
   FilterStatus,
   IndexStatus,
   OpenSummary,
@@ -122,4 +123,24 @@ export async function getCsvFilterStatus(): Promise<FilterStatus> {
 export async function clearCsvFilter(): Promise<FilterStatus> {
   requireDesktopRuntime("Clearing filter requires the desktop runtime");
   return invoke<FilterStatus>("clear_csv_filter");
+}
+
+export async function startCsvExport(targetPath: string): Promise<ExportStatus> {
+  requireDesktopRuntime("Exporting CSV rows requires the desktop runtime");
+  return invoke<ExportStatus>("start_csv_export", { targetPath });
+}
+
+export async function getCsvExportStatus(): Promise<ExportStatus> {
+  requireDesktopRuntime("Reading export status requires the desktop runtime");
+  return invoke<ExportStatus>("csv_export_status");
+}
+
+export async function cancelCsvExport(): Promise<ExportStatus> {
+  requireDesktopRuntime("Cancelling export requires the desktop runtime");
+  return invoke<ExportStatus>("cancel_csv_export");
+}
+
+export async function clearCsvExport(): Promise<ExportStatus> {
+  requireDesktopRuntime("Clearing export requires the desktop runtime");
+  return invoke<ExportStatus>("clear_csv_export");
 }
