@@ -1,9 +1,10 @@
 mod csv;
 
 use csv::{
-    build_filter, build_sort, CsvDocument, CsvFileProfile, CsvSearchProgress, CsvSearchSummary,
-    FilterBuildOptions, FilterState, FilterStatus, IndexStatus, OpenOptions, OpenSummary, RowBatch,
-    SortBuildOptions, SortDirection, SortState, SortStatus,
+    build_export, build_filter, build_sort, CsvDocument, CsvFileProfile, CsvSearchProgress,
+    CsvSearchSummary, ExportBuildOptions, ExportState, ExportStatus, FilterBuildOptions,
+    FilterState, FilterStatus, IndexStatus, OpenOptions, OpenSummary, RowBatch, SortBuildOptions,
+    SortDirection, SortState, SortStatus,
 };
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -33,6 +34,8 @@ pub struct AppState {
     sort_state: Arc<Mutex<SortState>>,
     filter_generation: Arc<AtomicU64>,
     filter_state: Arc<Mutex<FilterState>>,
+    export_generation: Arc<AtomicU64>,
+    export_state: Arc<Mutex<ExportState>>,
 }
 
 #[tauri::command]
@@ -72,6 +75,8 @@ async fn open_csv(
     state.sort_state.lock().clear();
     state.filter_generation.fetch_add(1, Ordering::SeqCst);
     state.filter_state.lock().clear();
+    state.export_generation.fetch_add(1, Ordering::SeqCst);
+    state.export_state.lock().clear();
     spawn_background_indexer(document_state, generation_state, generation);
 
     Ok(summary)
@@ -460,6 +465,163 @@ fn clear_csv_filter(state: State<'_, AppState>) -> FilterStatus {
     status
 }
 
+struct ExportStartParams {
+    target_path: PathBuf,
+    headers: Vec<String>,
+    delimiter: u8,
+    visible_indices: Vec<u64>,
+}
+
+/// Maximum rows per `get_rows_at_physical_data_indices` call. The document
+/// caps batches at this size; the export driver hands us chunks of
+/// `EXPORT_CHUNK_ROWS` (>256) so we sub-batch under one document lock.
+const EXPORT_FETCH_BATCH: usize = 256;
+
+#[tauri::command]
+async fn start_csv_export(
+    target_path: String,
+    state: State<'_, AppState>,
+) -> Result<ExportStatus, String> {
+    let document_state = Arc::clone(&state.document);
+    let sort_state = Arc::clone(&state.sort_state);
+    let filter_state = Arc::clone(&state.filter_state);
+    let export_state = Arc::clone(&state.export_state);
+    let export_generation = Arc::clone(&state.export_generation);
+
+    let target_path = PathBuf::from(target_path.trim());
+    if target_path.as_os_str().is_empty() {
+        return Err("Target path is empty.".to_owned());
+    }
+
+    let prepared = {
+        let guard = document_state.lock();
+        let document = guard
+            .as_ref()
+            .ok_or_else(|| csv::CsvError::NoDocument.to_string())?;
+
+        if !document.is_indexing_complete() {
+            return Err("Indexing in progress — wait for it to finish before exporting.".to_owned());
+        }
+
+        // Snapshot filter mask + sort permutation under the same view we'll
+        // export. If either changes mid-export the generation bump cancels us.
+        let filter_mask: Option<Vec<u64>> = filter_state.lock().mask.clone();
+        let sort_perm: Option<Vec<u64>> = sort_state.lock().permutation.clone();
+        let total_rows = document.data_row_count();
+
+        let visible_indices = match (filter_mask, sort_perm) {
+            (None, None) => (0..total_rows).collect::<Vec<u64>>(),
+            (None, Some(perm)) => perm,
+            (Some(mask), None) => mask,
+            (Some(mask), Some(perm)) => perm
+                .into_iter()
+                .filter(|phys| mask.binary_search(phys).is_ok())
+                .collect(),
+        };
+
+        ExportStartParams {
+            target_path: target_path.clone(),
+            headers: document.summarize().headers,
+            delimiter: document.delimiter(),
+            visible_indices,
+        }
+    };
+
+    let generation = export_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let total_rows = prepared.visible_indices.len() as u64;
+
+    {
+        let mut s = export_state.lock();
+        s.status = ExportStatus {
+            is_running: true,
+            is_complete: false,
+            target_path: Some(target_path.to_string_lossy().into_owned()),
+            rows_written: 0,
+            total_rows,
+            error: None,
+        };
+    }
+
+    let document_for_fetch = Arc::clone(&document_state);
+    let state_for_error = Arc::clone(&export_state);
+    let generation_for_error = Arc::clone(&export_generation);
+
+    let build_options = ExportBuildOptions {
+        target_path: prepared.target_path,
+        headers: prepared.headers,
+        delimiter: prepared.delimiter,
+        visible_indices: prepared.visible_indices,
+        generation,
+        generation_state: Arc::clone(&export_generation),
+        state: Arc::clone(&export_state),
+        fetch_chunk: move |visible_start: u64, indices: &[u64]| {
+            let mut guard = document_for_fetch.lock();
+            let document = guard.as_mut().ok_or(csv::CsvError::NoDocument)?;
+
+            let mut out: Vec<Vec<String>> = Vec::with_capacity(indices.len());
+            let header_count = document.summarize().headers.len();
+            let mut offset = 0usize;
+            while offset < indices.len() {
+                let end = (offset + EXPORT_FETCH_BATCH).min(indices.len());
+                let sub = &indices[offset..end];
+                let batch = document.get_rows_at_physical_data_indices(
+                    visible_start + offset as u64,
+                    sub,
+                    0,
+                    header_count,
+                )?;
+                out.extend(batch.rows);
+                offset = end;
+            }
+            Ok(out)
+        },
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(err) = build_export(build_options) {
+            if generation_for_error.load(Ordering::SeqCst) == generation {
+                let mut s = state_for_error.lock();
+                s.status.is_running = false;
+                s.status.is_complete = false;
+                s.status.error = Some(err.to_string());
+            }
+        }
+    });
+
+    let status = export_state.lock().status.clone();
+    Ok(status)
+}
+
+#[tauri::command]
+fn csv_export_status(state: State<'_, AppState>) -> ExportStatus {
+    let status = state.export_state.lock().status.clone();
+    status
+}
+
+#[tauri::command]
+fn cancel_csv_export(state: State<'_, AppState>) -> ExportStatus {
+    state.export_generation.fetch_add(1, Ordering::SeqCst);
+    let mut s = state.export_state.lock();
+    if s.status.is_running {
+        s.status.is_running = false;
+        s.status.is_complete = false;
+        s.status.error = Some("Cancelled.".to_owned());
+    }
+    let status = s.status.clone();
+    drop(s);
+    status
+}
+
+#[tauri::command]
+fn clear_csv_export(state: State<'_, AppState>) -> ExportStatus {
+    state.export_generation.fetch_add(1, Ordering::SeqCst);
+    let mut s = state.export_state.lock();
+    s.clear();
+    let status = s.status.clone();
+    drop(s);
+    status
+}
+
 #[tauri::command]
 fn startup_csv_path() -> Option<String> {
     std::env::var("CLEAR_ROWS_OPEN_CSV")
@@ -481,6 +643,8 @@ pub fn run() {
             sort_state: Arc::new(Mutex::new(SortState::idle())),
             filter_generation: Arc::new(AtomicU64::new(0)),
             filter_state: Arc::new(Mutex::new(FilterState::idle())),
+            export_generation: Arc::new(AtomicU64::new(0)),
+            export_state: Arc::new(Mutex::new(ExportState::idle())),
         })
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -497,6 +661,10 @@ pub fn run() {
             start_csv_filter,
             csv_filter_status,
             clear_csv_filter,
+            start_csv_export,
+            csv_export_status,
+            cancel_csv_export,
+            clear_csv_export,
             startup_csv_path
         ])
         .run(tauri::generate_context!())

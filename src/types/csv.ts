@@ -114,3 +114,12 @@ export type FilterStatus = {
   matched_rows: number;
   error: string | null;
 };
+
+export type ExportStatus = {
+  is_running: boolean;
+  is_complete: boolean;
+  target_path: string | null;
+  rows_written: number;
+  total_rows: number;
+  error: string | null;
+};
