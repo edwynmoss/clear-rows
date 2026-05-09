@@ -104,3 +104,13 @@ export type SortStatus = {
   total_rows: number;
   error: string | null;
 };
+
+export type FilterStatus = {
+  is_filtering: boolean;
+  is_ready: boolean;
+  query: string | null;
+  rows_scanned: number;
+  total_rows: number;
+  matched_rows: number;
+  error: string | null;
+};

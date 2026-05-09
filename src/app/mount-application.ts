@@ -2,6 +2,7 @@ import type { AppShell } from "../components/app-shell";
 import { CSV_ROW_HEIGHT_PX } from "./constants";
 import { createAppShell } from "../components/app-shell";
 import { createCsvEmptyState } from "../components/csv-empty-state";
+import { createCsvFilterBar } from "../components/csv-filter-bar";
 import { createCsvPreviewGrid } from "../components/csv-preview-grid";
 import { createCsvSearchPanel } from "../components/csv-search-panel";
 import { createReopenAsControl } from "../components/reopen-as-control";
@@ -23,6 +24,7 @@ import type {
   CsvFileProfileResult,
   CsvSearchMatch,
   CsvSearchProgress,
+  FilterStatus,
   SortDirection,
   SortStatus,
 } from "../types/csv";
@@ -31,6 +33,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 const JUMP_POLL_INTERVAL_MS = 200;
 const SEARCH_PROGRESS_POLL_INTERVAL_MS = 200;
 const SORT_PROGRESS_POLL_INTERVAL_MS = 250;
+const FILTER_PROGRESS_POLL_INTERVAL_MS = 250;
 
 export function mountApplication(host: HTMLElement): void {
   const hasDesktopRuntime = isDesktopRuntime();
@@ -72,6 +75,7 @@ export function mountApplication(host: HTMLElement): void {
   let isSearchCancelling = false;
   let resultJumpGeneration = 0;
   let sortGeneration = 0;
+  let filterGeneration = 0;
 
   const searchPanel = createCsvSearchPanel({
     initialLimit: getStoredSearchLimit(),
@@ -99,6 +103,149 @@ export function mountApplication(host: HTMLElement): void {
     },
   });
 
+  const filterBar = createCsvFilterBar({
+    onApply: (query) => {
+      void runFilterFlow(query);
+    },
+    onClear: () => {
+      void runClearFilter();
+    },
+  });
+
+  async function runFilterFlow(query: string): Promise<void> {
+    if (!session.path || isOpening) {
+      return;
+    }
+
+    const trimmed = query.trim();
+    const generation = ++filterGeneration;
+
+    if (trimmed.length === 0) {
+      await runClearFilter();
+      return;
+    }
+
+    filterBar.setBusy(true);
+    filterBar.setStatus("Scanning…");
+    shell.status.setText(`Filtering rows containing “${trimmed}”…`, "busy");
+
+    try {
+      await csvApi.startCsvFilter(trimmed);
+    } catch (err) {
+      if (generation === filterGeneration) {
+        filterBar.setBusy(false);
+        const message = formatError(err);
+        filterBar.setStatus(message, "negative");
+        shell.status.setText(`Filter error: ${message}`, "negative");
+      }
+      return;
+    }
+
+    await pollFilterStatus(generation, trimmed);
+  }
+
+  async function runClearFilter(): Promise<void> {
+    if (!session.path) {
+      return;
+    }
+    const generation = ++filterGeneration;
+
+    try {
+      await csvApi.clearCsvFilter();
+    } catch (err) {
+      if (generation === filterGeneration) {
+        const message = formatError(err);
+        filterBar.setStatus(message, "negative");
+        shell.status.setText(`Clear filter error: ${message}`, "negative");
+      }
+      return;
+    }
+
+    if (generation !== filterGeneration) {
+      return;
+    }
+    session.applyActiveFilter(null);
+    filterBar.setActiveQuery(null);
+    filterBar.setBusy(false);
+    filterBar.setStatus("");
+    virtualizer.resetRowsForVisibilityChange();
+    virtualizer.updateAria();
+    shell.status.setText("Filter cleared.", "neutral");
+  }
+
+  async function pollFilterStatus(generation: number, query: string): Promise<void> {
+    while (generation === filterGeneration) {
+      let status: FilterStatus;
+      try {
+        status = await csvApi.getCsvFilterStatus();
+      } catch (err) {
+        if (generation === filterGeneration) {
+          const message = formatError(err);
+          filterBar.setBusy(false);
+          filterBar.setStatus(message, "negative");
+          shell.status.setText(`Filter status error: ${message}`, "negative");
+        }
+        return;
+      }
+
+      if (generation !== filterGeneration) {
+        return;
+      }
+
+      if (status.error) {
+        filterBar.setBusy(false);
+        filterBar.setStatus(status.error, "negative");
+        shell.status.setText(`Filter error: ${status.error}`, "negative");
+        return;
+      }
+
+      if (status.is_ready && !status.is_filtering) {
+        const matched = status.matched_rows;
+        const total = status.total_rows;
+        session.applyActiveFilter({ query, matchedRows: matched });
+        filterBar.setActiveQuery(query);
+        filterBar.setBusy(false);
+        filterBar.setStatus(formatFilterMatches(matched, total));
+        virtualizer.resetRowsForVisibilityChange();
+        virtualizer.updateAria();
+        shell.status.setText(
+          `Filter applied · ${matched.toLocaleString()} of ${total.toLocaleString()} rows match.`,
+          matched === 0 ? "neutral" : "positive",
+        );
+        return;
+      }
+
+      if (!status.is_filtering && !status.is_ready) {
+        // Cancelled or never started.
+        filterBar.setBusy(false);
+        filterBar.setStatus("");
+        return;
+      }
+
+      filterBar.setStatus(formatFilterProgress(status));
+      shell.status.setText(formatFilterProgress(status), "busy");
+      await wait(FILTER_PROGRESS_POLL_INTERVAL_MS);
+    }
+  }
+
+  function formatFilterProgress(status: FilterStatus): string {
+    const scanned = status.rows_scanned.toLocaleString();
+    const matched = status.matched_rows.toLocaleString();
+    if (status.total_rows > 0) {
+      const total = status.total_rows.toLocaleString();
+      return `Scanning ${scanned} of ${total} rows · ${matched} match${
+        status.matched_rows === 1 ? "" : "es"
+      }…`;
+    }
+    return `Scanning ${scanned} rows · ${matched} match${
+      status.matched_rows === 1 ? "" : "es"
+    }…`;
+  }
+
+  function formatFilterMatches(matched: number, total: number): string {
+    return `${matched.toLocaleString()} of ${total.toLocaleString()} rows match`;
+  }
+
   async function runSortFlow(columnIndex: number): Promise<void> {
     if (!session.path || isOpening) {
       return;
@@ -119,7 +266,7 @@ export function mountApplication(host: HTMLElement): void {
         }
         session.activeSort = null;
         virtualizer.setPendingSortColumn(null);
-        virtualizer.resetRowsForSortChange();
+        virtualizer.resetRowsForVisibilityChange();
         shell.status.setText("Sort cleared.", "neutral");
       } catch (err) {
         if (generation === sortGeneration) {
@@ -180,7 +327,7 @@ export function mountApplication(host: HTMLElement): void {
       if (status.is_ready && !status.is_sorting) {
         session.activeSort = { column: columnIndex, direction };
         virtualizer.setPendingSortColumn(null);
-        virtualizer.resetRowsForSortChange();
+        virtualizer.resetRowsForVisibilityChange();
         shell.status.setText(
           `Sorted by ${columnName} (${direction}) · ${status.total_rows.toLocaleString()} rows.`,
           "positive",
@@ -229,6 +376,7 @@ export function mountApplication(host: HTMLElement): void {
 
     resultJumpGeneration++;
     sortGeneration++;
+    filterGeneration++;
     virtualizer.setPendingSortColumn(null);
     isOpening = true;
     try {
@@ -273,6 +421,13 @@ export function mountApplication(host: HTMLElement): void {
       grid.root.classList.remove("hidden");
       shell.setSubtitleVisible(false);
       syncReopenAsControl();
+      // Reset the filter bar to its empty state — opening a new file clears
+      // any prior filter on the backend, so the UI must mirror that.
+      filterBar.input.value = "";
+      filterBar.setBusy(false);
+      filterBar.setStatus("");
+      filterBar.setActiveQuery(null);
+      filterBar.setVisible(true);
       return;
     }
 
@@ -280,12 +435,14 @@ export function mountApplication(host: HTMLElement): void {
     empty.root.classList.remove("hidden");
     shell.setSubtitleVisible(true);
     reopenAsControl.setEnabled(false);
+    filterBar.setVisible(false);
   }
 
   function revealSearchResults(): void {
     empty.root.classList.add("hidden");
     grid.root.classList.add("hidden");
     searchResults.root.classList.remove("hidden");
+    filterBar.setVisible(false);
   }
 
   async function runOpenFlow(): Promise<void> {
@@ -295,6 +452,7 @@ export function mountApplication(host: HTMLElement): void {
 
     resultJumpGeneration++;
     sortGeneration++;
+    filterGeneration++;
     virtualizer.setPendingSortColumn(null);
     isOpening = true;
     try {
@@ -650,7 +808,7 @@ export function mountApplication(host: HTMLElement): void {
     },
   });
 
-  workspace.append(empty.root, grid.root, searchResults.root);
+  workspace.append(empty.root, filterBar.root, grid.root, searchResults.root);
   shell.gridHost.append(searchPanel.root, workspace);
   virtualizer.bind();
 
@@ -681,6 +839,15 @@ export function mountApplication(host: HTMLElement): void {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "o") {
       e.preventDefault();
       void runOpenFlow();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+      // Only intercept Ctrl/Cmd-F when a CSV is open, otherwise let the
+      // browser-default in-page find apply (no-op in WebView2 either way).
+      if (session.path) {
+        e.preventDefault();
+        filterBar.focus();
+      }
     }
   });
 
