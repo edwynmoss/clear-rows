@@ -467,9 +467,12 @@ fn clear_csv_filter(state: State<'_, AppState>) -> FilterStatus {
 
 struct ExportStartParams {
     target_path: PathBuf,
+    /// Headers projected through `column_indices`.
     headers: Vec<String>,
     delimiter: u8,
     visible_indices: Vec<u64>,
+    /// Physical column indices to include in the export, in output order.
+    column_indices: Vec<usize>,
 }
 
 /// Maximum rows per `get_rows_at_physical_data_indices` call. The document
@@ -480,6 +483,7 @@ const EXPORT_FETCH_BATCH: usize = 256;
 #[tauri::command]
 async fn start_csv_export(
     target_path: String,
+    column_indices: Option<Vec<usize>>,
     state: State<'_, AppState>,
 ) -> Result<ExportStatus, String> {
     let document_state = Arc::clone(&state.document);
@@ -503,6 +507,30 @@ async fn start_csv_export(
             return Err("Indexing in progress — wait for it to finish before exporting.".to_owned());
         }
 
+        let all_headers = document.summarize().headers;
+        let header_count = all_headers.len();
+
+        // Default to every column (in original order) when the caller
+        // doesn't specify a subset.
+        let columns: Vec<usize> = match column_indices {
+            None => (0..header_count).collect(),
+            Some(indices) => {
+                if indices.is_empty() {
+                    return Err("Pick at least one column to export.".to_owned());
+                }
+                if let Some(&out_of_range) = indices.iter().find(|&&i| i >= header_count) {
+                    return Err(format!(
+                        "Column index {} is out of range (have {} columns).",
+                        out_of_range, header_count
+                    ));
+                }
+                indices
+            }
+        };
+
+        let projected_headers: Vec<String> =
+            columns.iter().map(|&i| all_headers[i].clone()).collect();
+
         // Snapshot filter mask + sort permutation under the same view we'll
         // export. If either changes mid-export the generation bump cancels us.
         let filter_mask: Option<Vec<u64>> = filter_state.lock().mask.clone();
@@ -521,9 +549,10 @@ async fn start_csv_export(
 
         ExportStartParams {
             target_path: target_path.clone(),
-            headers: document.summarize().headers,
+            headers: projected_headers,
             delimiter: document.delimiter(),
             visible_indices,
+            column_indices: columns,
         }
     };
 
@@ -545,6 +574,7 @@ async fn start_csv_export(
     let document_for_fetch = Arc::clone(&document_state);
     let state_for_error = Arc::clone(&export_state);
     let generation_for_error = Arc::clone(&export_generation);
+    let column_indices = prepared.column_indices;
 
     let build_options = ExportBuildOptions {
         target_path: prepared.target_path,
@@ -570,7 +600,14 @@ async fn start_csv_export(
                     0,
                     header_count,
                 )?;
-                out.extend(batch.rows);
+                // Project each fetched row down to the requested columns.
+                for row in batch.rows {
+                    let mut projected = Vec::with_capacity(column_indices.len());
+                    for &col in &column_indices {
+                        projected.push(row.get(col).cloned().unwrap_or_default());
+                    }
+                    out.push(projected);
+                }
                 offset = end;
             }
             Ok(out)

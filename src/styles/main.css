@@ -256,6 +256,111 @@
     padding-inline: 0.7rem;
   }
 
+  .dp-colvis {
+    position: relative;
+  }
+
+  .dp-colvis-trigger {
+    font-size: 0.78rem;
+    padding-inline: 0.7rem;
+  }
+
+  .dp-colvis-panel {
+    background: var(--semantic-surface);
+    border: 1px solid color-mix(in oklab, var(--semantic-border), transparent 8%);
+    border-radius: 0.55rem;
+    box-shadow:
+      0 12px 30px rgb(0 0 0 / 0.18),
+      0 1px 1px rgb(0 0 0 / 0.14);
+    display: grid;
+    gap: 0.55rem;
+    max-height: 22rem;
+    min-width: 16rem;
+    padding: 0.7rem;
+    position: absolute;
+    right: 0;
+    top: calc(100% + 0.4rem);
+    z-index: 40;
+  }
+
+  .dp-colvis-header {
+    align-items: center;
+    border-bottom: 1px solid color-mix(in oklab, var(--semantic-border), transparent 30%);
+    display: flex;
+    gap: 0.6rem;
+    justify-content: space-between;
+    padding-bottom: 0.45rem;
+  }
+
+  .dp-colvis-title {
+    color: var(--semantic-text-muted);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+
+  .dp-colvis-quick-actions {
+    display: flex;
+    gap: 0.4rem;
+  }
+
+  .dp-colvis-link {
+    background: transparent;
+    border: 0;
+    color: var(--semantic-accent);
+    cursor: pointer;
+    font-size: 0.74rem;
+    font-weight: 600;
+    padding: 0.1rem 0.2rem;
+  }
+
+  .dp-colvis-link:hover {
+    text-decoration: underline;
+  }
+
+  .dp-colvis-list {
+    display: grid;
+    gap: 0.15rem;
+    max-height: 16rem;
+    overflow-y: auto;
+    padding-right: 0.2rem;
+  }
+
+  .dp-colvis-row {
+    align-items: center;
+    border-radius: 0.35rem;
+    cursor: pointer;
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.3rem 0.4rem;
+  }
+
+  .dp-colvis-row:hover {
+    background: color-mix(in oklab, var(--semantic-accent), transparent 92%);
+  }
+
+  .dp-colvis-checkbox {
+    accent-color: var(--semantic-accent);
+    height: 0.95rem;
+    width: 0.95rem;
+  }
+
+  .dp-colvis-label {
+    color: var(--semantic-text-primary);
+    flex: 1;
+    font-size: 0.82rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dp-colvis-empty {
+    color: var(--semantic-text-muted);
+    font-size: 0.78rem;
+    padding: 0.4rem 0.2rem;
+  }
+
   .dp-filter-bar {
     align-items: center;
     background: color-mix(in oklab, var(--semantic-surface), var(--semantic-background) 35%);
