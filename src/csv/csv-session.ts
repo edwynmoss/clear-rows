@@ -46,6 +46,12 @@ export class CsvSession {
    * physical row count so the virtual scrollbar sizes to the visible rows.
    */
   activeFilter: ActiveFilter | null = null;
+  /**
+   * Physical column indices the user has explicitly hidden. Hidden columns
+   * are not rendered in the grid and are skipped by export. Cleared on every
+   * new file open.
+   */
+  hiddenColumns: Set<number> = new Set();
 
   applySummary(summary: OpenSummary, colWidthPx: number = CSV_DEFAULT_COL_WIDTH_PX): void {
     this.path = summary.path;
@@ -57,6 +63,29 @@ export class CsvSession {
     // Opening a new file invalidates any prior sort/filter state on the backend; mirror that.
     this.activeSort = null;
     this.activeFilter = null;
+    this.hiddenColumns = new Set();
+  }
+
+  /** Effective column widths with hidden columns folded to zero. */
+  effectiveColWidths(): number[] {
+    if (this.hiddenColumns.size === 0) {
+      return this.colWidths;
+    }
+    return this.colWidths.map((w, i) => (this.hiddenColumns.has(i) ? 0 : w));
+  }
+
+  /** Physical column indices that are currently visible, in original order. */
+  visibleColumnIndices(): number[] {
+    if (this.hiddenColumns.size === 0) {
+      return this.headers.map((_, i) => i);
+    }
+    const out: number[] = [];
+    for (let i = 0; i < this.headers.length; i++) {
+      if (!this.hiddenColumns.has(i)) {
+        out.push(i);
+      }
+    }
+    return out;
   }
 
   applyIndexStatus(status: IndexStatus): {

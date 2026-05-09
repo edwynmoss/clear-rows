@@ -4,6 +4,7 @@ import { createAppShell } from "../components/app-shell";
 import { createCsvEmptyState } from "../components/csv-empty-state";
 import { createCsvFilterBar } from "../components/csv-filter-bar";
 import { createCsvPreviewGrid } from "../components/csv-preview-grid";
+import { createColumnVisibilityControl } from "../components/column-visibility-control";
 import { createCsvSearchPanel } from "../components/csv-search-panel";
 import { createExportButton } from "../components/export-button";
 import { createReopenAsControl } from "../components/reopen-as-control";
@@ -111,6 +112,13 @@ export function mountApplication(host: HTMLElement): void {
   const exportButton = createExportButton({
     onClick: () => {
       void runExportFlow();
+    },
+  });
+
+  const columnVisibilityControl = createColumnVisibilityControl({
+    onChange: (hidden) => {
+      session.hiddenColumns = hidden;
+      virtualizer.scheduleRefresh();
     },
   });
 
@@ -404,9 +412,14 @@ export function mountApplication(host: HTMLElement): void {
     exportButton.setBusy(true);
     shell.status.setText("Preparing export…", "busy");
 
+    // Always pass the explicit column subset (in display order) so hidden
+    // columns are dropped at export time. The backend treats `null` as
+    // "all columns", but we'd rather always be explicit from the UI side.
+    const columnIndices = session.visibleColumnIndices();
+
     let initial: ExportStatus;
     try {
-      initial = await csvApi.startCsvExport(target);
+      initial = await csvApi.startCsvExport(target, columnIndices);
     } catch (err) {
       if (generation === exportGeneration) {
         exportButton.setBusy(false);
@@ -560,6 +573,8 @@ export function mountApplication(host: HTMLElement): void {
       filterBar.setVisible(true);
       exportButton.setBusy(false);
       exportButton.setEnabled(true);
+      columnVisibilityControl.setColumns(session.headers, session.hiddenColumns);
+      columnVisibilityControl.setEnabled(true);
       return;
     }
 
@@ -569,6 +584,7 @@ export function mountApplication(host: HTMLElement): void {
     reopenAsControl.setEnabled(false);
     filterBar.setVisible(false);
     exportButton.setEnabled(false);
+    columnVisibilityControl.setEnabled(false);
   }
 
   function revealSearchResults(): void {
@@ -577,6 +593,7 @@ export function mountApplication(host: HTMLElement): void {
     searchResults.root.classList.remove("hidden");
     filterBar.setVisible(false);
     exportButton.setEnabled(false);
+    columnVisibilityControl.setEnabled(false);
   }
 
   async function runOpenFlow(): Promise<void> {
@@ -941,7 +958,12 @@ export function mountApplication(host: HTMLElement): void {
     subtitle: "Large-file preview and search",
     version: __APP_VERSION__,
     footerTagline: "Local desktop",
-    headerExtras: [reopenAsControl.root, exportButton.root, createThemeToggle()],
+    headerExtras: [
+      reopenAsControl.root,
+      columnVisibilityControl.root,
+      exportButton.root,
+      createThemeToggle(),
+    ],
     onOpenCsv: () => {
       void runOpenFlow();
     },

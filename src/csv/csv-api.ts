@@ -125,9 +125,15 @@ export async function clearCsvFilter(): Promise<FilterStatus> {
   return invoke<FilterStatus>("clear_csv_filter");
 }
 
-export async function startCsvExport(targetPath: string): Promise<ExportStatus> {
+export async function startCsvExport(
+  targetPath: string,
+  columnIndices: number[] | null,
+): Promise<ExportStatus> {
   requireDesktopRuntime("Exporting CSV rows requires the desktop runtime");
-  return invoke<ExportStatus>("start_csv_export", { targetPath });
+  return invoke<ExportStatus>("start_csv_export", {
+    targetPath,
+    columnIndices,
+  });
 }
 
 export async function getCsvExportStatus(): Promise<ExportStatus> {
