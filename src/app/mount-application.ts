@@ -19,11 +19,18 @@ import { pickCsvSearchPaths } from "../csv/search-csv-flow";
 import { CsvSession } from "../csv/csv-session";
 import * as csvApi from "../csv/csv-api";
 import { isDesktopRuntime } from "../tauri/runtime";
-import type { CsvFileProfileResult, CsvSearchMatch, CsvSearchProgress } from "../types/csv";
+import type {
+  CsvFileProfileResult,
+  CsvSearchMatch,
+  CsvSearchProgress,
+  SortDirection,
+  SortStatus,
+} from "../types/csv";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 const JUMP_POLL_INTERVAL_MS = 200;
 const SEARCH_PROGRESS_POLL_INTERVAL_MS = 200;
+const SORT_PROGRESS_POLL_INTERVAL_MS = 250;
 
 export function mountApplication(host: HTMLElement): void {
   const hasDesktopRuntime = isDesktopRuntime();
@@ -64,6 +71,7 @@ export function mountApplication(host: HTMLElement): void {
   let isSearchRunning = false;
   let isSearchCancelling = false;
   let resultJumpGeneration = 0;
+  let sortGeneration = 0;
 
   const searchPanel = createCsvSearchPanel({
     initialLimit: getStoredSearchLimit(),
@@ -91,12 +99,137 @@ export function mountApplication(host: HTMLElement): void {
     },
   });
 
+  async function runSortFlow(columnIndex: number): Promise<void> {
+    if (!session.path || isOpening) {
+      return;
+    }
+
+    if (columnIndex < 0 || columnIndex >= session.headers.length) {
+      return;
+    }
+
+    const generation = ++sortGeneration;
+    const direction = nextSortDirection(session.activeSort, columnIndex);
+
+    if (direction === null) {
+      try {
+        await csvApi.clearCsvSort();
+        if (generation !== sortGeneration) {
+          return;
+        }
+        session.activeSort = null;
+        virtualizer.setPendingSortColumn(null);
+        virtualizer.resetRowsForSortChange();
+        shell.status.setText("Sort cleared.", "neutral");
+      } catch (err) {
+        if (generation === sortGeneration) {
+          console.error(err);
+          shell.status.setText(`Clear sort error: ${formatError(err)}`, "negative");
+        }
+      }
+      return;
+    }
+
+    const columnName = session.headers[columnIndex] || `column ${columnIndex + 1}`;
+    virtualizer.setPendingSortColumn(columnIndex);
+    shell.status.setText(`Sorting by ${columnName} (${direction})…`, "busy");
+
+    try {
+      await csvApi.startCsvSort(columnIndex, direction);
+    } catch (err) {
+      if (generation === sortGeneration) {
+        virtualizer.setPendingSortColumn(null);
+        console.error(err);
+        shell.status.setText(`Sort error: ${formatError(err)}`, "negative");
+      }
+      return;
+    }
+
+    await pollSortStatus(generation, columnIndex, direction, columnName);
+  }
+
+  async function pollSortStatus(
+    generation: number,
+    columnIndex: number,
+    direction: SortDirection,
+    columnName: string,
+  ): Promise<void> {
+    while (generation === sortGeneration) {
+      let status: SortStatus;
+      try {
+        status = await csvApi.getCsvSortStatus();
+      } catch (err) {
+        if (generation === sortGeneration) {
+          console.error(err);
+          shell.status.setText(`Sort status error: ${formatError(err)}`, "negative");
+          virtualizer.setPendingSortColumn(null);
+        }
+        return;
+      }
+
+      if (generation !== sortGeneration) {
+        return;
+      }
+
+      if (status.error) {
+        virtualizer.setPendingSortColumn(null);
+        shell.status.setText(`Sort error: ${status.error}`, "negative");
+        return;
+      }
+
+      if (status.is_ready && !status.is_sorting) {
+        session.activeSort = { column: columnIndex, direction };
+        virtualizer.setPendingSortColumn(null);
+        virtualizer.resetRowsForSortChange();
+        shell.status.setText(
+          `Sorted by ${columnName} (${direction}) · ${status.total_rows.toLocaleString()} rows.`,
+          "positive",
+        );
+        return;
+      }
+
+      if (!status.is_sorting && !status.is_ready) {
+        // Sort was cleared or never started. Drop the pending indicator.
+        virtualizer.setPendingSortColumn(null);
+        return;
+      }
+
+      shell.status.setText(formatSortProgress(status, columnName), "busy");
+      await wait(SORT_PROGRESS_POLL_INTERVAL_MS);
+    }
+  }
+
+  function nextSortDirection(
+    activeSort: { column: number; direction: SortDirection } | null,
+    columnIndex: number,
+  ): SortDirection | null {
+    // Cycle: unsorted -> asc -> desc -> unsorted (per column).
+    if (!activeSort || activeSort.column !== columnIndex) {
+      return "asc";
+    }
+    if (activeSort.direction === "asc") {
+      return "desc";
+    }
+    return null;
+  }
+
+  function formatSortProgress(status: SortStatus, columnName: string): string {
+    const rows = status.rows_scanned.toLocaleString();
+    const total = status.total_rows > 0 ? status.total_rows.toLocaleString() : null;
+    if (total !== null) {
+      return `Sorting by ${columnName} · ${rows} of ${total} rows scanned…`;
+    }
+    return `Sorting by ${columnName} · ${rows} rows scanned…`;
+  }
+
   async function runReopenAs(delimiter: string, encoding: string): Promise<void> {
     if (!session.path || isOpening) {
       return;
     }
 
     resultJumpGeneration++;
+    sortGeneration++;
+    virtualizer.setPendingSortColumn(null);
     isOpening = true;
     try {
       await openCsvFromPath(
@@ -161,6 +294,8 @@ export function mountApplication(host: HTMLElement): void {
     }
 
     resultJumpGeneration++;
+    sortGeneration++;
+    virtualizer.setPendingSortColumn(null);
     isOpening = true;
     try {
       await openCsvFromDialog(shell.status, session, virtualizer, {
@@ -179,6 +314,8 @@ export function mountApplication(host: HTMLElement): void {
         return;
       }
 
+      sortGeneration++;
+      virtualizer.setPendingSortColumn(null);
       isOpening = true;
       try {
         await openCsvFromPath(path, shell.status, session, virtualizer, {
@@ -354,6 +491,8 @@ export function mountApplication(host: HTMLElement): void {
 
     try {
       if (session.path !== match.path) {
+        sortGeneration++;
+        virtualizer.setPendingSortColumn(null);
         isOpening = true;
         shell.status.setText(
           `Opening ${match.file_name} at row ${match.row_index.toLocaleString()}…`,
@@ -515,6 +654,22 @@ export function mountApplication(host: HTMLElement): void {
   shell.gridHost.append(searchPanel.root, workspace);
   virtualizer.bind();
 
+  grid.headerViewport.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const cell = target.closest<HTMLElement>("[data-column-index]");
+    if (!cell) {
+      return;
+    }
+    const columnIndex = Number.parseInt(cell.dataset.columnIndex ?? "", 10);
+    if (Number.isNaN(columnIndex)) {
+      return;
+    }
+    void runSortFlow(columnIndex);
+  });
+
   host.replaceChildren(shell.root);
 
   if (hasDesktopRuntime) {
@@ -549,6 +704,8 @@ export function mountApplication(host: HTMLElement): void {
       }
 
       resultJumpGeneration++;
+      sortGeneration++;
+      virtualizer.setPendingSortColumn(null);
       isOpening = true;
       (async () => {
         try {
