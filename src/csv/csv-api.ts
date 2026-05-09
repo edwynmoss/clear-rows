@@ -6,6 +6,7 @@ import type {
   CsvFileProfileResult,
   CsvSearchProgress,
   CsvSearchSummary,
+  FilterStatus,
   IndexStatus,
   OpenSummary,
   RowBatch,
@@ -106,4 +107,19 @@ export async function getCsvSortStatus(): Promise<SortStatus> {
 export async function clearCsvSort(): Promise<SortStatus> {
   requireDesktopRuntime("Clearing sort requires the desktop runtime");
   return invoke<SortStatus>("clear_csv_sort");
+}
+
+export async function startCsvFilter(query: string): Promise<FilterStatus> {
+  requireDesktopRuntime("Filtering CSV rows requires the desktop runtime");
+  return invoke<FilterStatus>("start_csv_filter", { query });
+}
+
+export async function getCsvFilterStatus(): Promise<FilterStatus> {
+  requireDesktopRuntime("Reading filter status requires the desktop runtime");
+  return invoke<FilterStatus>("csv_filter_status");
+}
+
+export async function clearCsvFilter(): Promise<FilterStatus> {
+  requireDesktopRuntime("Clearing filter requires the desktop runtime");
+  return invoke<FilterStatus>("clear_csv_filter");
 }

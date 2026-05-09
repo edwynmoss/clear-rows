@@ -1,8 +1,9 @@
 mod csv;
 
 use csv::{
-    build_sort, CsvDocument, CsvFileProfile, CsvSearchProgress, CsvSearchSummary, IndexStatus,
-    OpenOptions, OpenSummary, RowBatch, SortBuildOptions, SortDirection, SortState, SortStatus,
+    build_filter, build_sort, CsvDocument, CsvFileProfile, CsvSearchProgress, CsvSearchSummary,
+    FilterBuildOptions, FilterState, FilterStatus, IndexStatus, OpenOptions, OpenSummary, RowBatch,
+    SortBuildOptions, SortDirection, SortState, SortStatus,
 };
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -30,6 +31,8 @@ pub struct AppState {
     search_progress: Arc<Mutex<CsvSearchProgress>>,
     sort_generation: Arc<AtomicU64>,
     sort_state: Arc<Mutex<SortState>>,
+    filter_generation: Arc<AtomicU64>,
+    filter_state: Arc<Mutex<FilterState>>,
 }
 
 #[tauri::command]
@@ -62,11 +65,13 @@ async fn open_csv(
     .map_err(|err| err.to_string())?;
 
     *document_state.lock() = Some(document);
-    // Opening a new document invalidates any prior sort. Bump the sort
-    // generation so an in-flight sort job won't write stale state into the
+    // Opening a new document invalidates any prior sort or filter. Bump both
+    // generations so in-flight jobs don't write stale state into the
     // freshly-opened file's session.
     state.sort_generation.fetch_add(1, Ordering::SeqCst);
     state.sort_state.lock().clear();
+    state.filter_generation.fetch_add(1, Ordering::SeqCst);
+    state.filter_state.lock().clear();
     spawn_background_indexer(document_state, generation_state, generation);
 
     Ok(summary)
@@ -82,31 +87,23 @@ async fn get_csv_rows(
 ) -> Result<RowBatch, String> {
     let document_state = Arc::clone(&state.document);
     let sort_state = Arc::clone(&state.sort_state);
+    let filter_state = Arc::clone(&state.filter_state);
 
     tauri::async_runtime::spawn_blocking(move || {
-        // Snapshot the current permutation slice we need *before* we lock the
-        // document, so we don't hold both mutexes at once. The permutation is
-        // only mutated when a sort completes (under the same lock) so a clone
-        // here is the only safe path while the document is borrowed mut.
-        let permutation_slice: Option<Vec<u64>> = {
-            let guard = sort_state.lock();
-            guard.permutation.as_ref().map(|perm| {
-                let start_usize = usize::try_from(start).unwrap_or(usize::MAX);
-                if start_usize >= perm.len() {
-                    Vec::new()
-                } else {
-                    let end = start_usize.saturating_add(count).min(perm.len());
-                    perm[start_usize..end].to_vec()
-                }
-            })
-        };
+        // Snapshot filter mask and sort permutation up front so we don't
+        // hold either lock while reading the document.
+        let filter_mask: Option<Vec<u64>> = filter_state.lock().mask.clone();
+        let sort_perm: Option<Vec<u64>> = sort_state.lock().permutation.clone();
+
+        let physical_slice: Option<Vec<u64>> =
+            compose_visible_slice(filter_mask, sort_perm, start, count);
 
         let mut guard = document_state.lock();
         let document = guard
             .as_mut()
             .ok_or_else(|| csv::CsvError::NoDocument.to_string())?;
 
-        match permutation_slice {
+        match physical_slice {
             Some(slice) => document
                 .get_rows_at_physical_data_indices(start, &slice, column_start, column_count)
                 .map_err(|err| err.to_string()),
@@ -117,6 +114,54 @@ async fn get_csv_rows(
     })
     .await
     .map_err(|err| err.to_string())?
+}
+
+/// Resolve the requested page of *visible* rows to a slice of physical row
+/// indices, given the active filter and sort. Returns `None` when no filter
+/// or sort is active (caller falls back to physical-row reads).
+fn compose_visible_slice(
+    filter_mask: Option<Vec<u64>>,
+    sort_perm: Option<Vec<u64>>,
+    start: u64,
+    count: usize,
+) -> Option<Vec<u64>> {
+    match (filter_mask, sort_perm) {
+        (None, None) => None,
+        (None, Some(perm)) => Some(slice_into(&perm, start, count)),
+        (Some(mask), None) => Some(slice_into(&mask, start, count)),
+        (Some(mask), Some(perm)) => Some(compose_filter_over_sort(&mask, &perm, start, count)),
+    }
+}
+
+fn slice_into(source: &[u64], start: u64, count: usize) -> Vec<u64> {
+    let start_usize = usize::try_from(start).unwrap_or(usize::MAX);
+    if start_usize >= source.len() {
+        return Vec::new();
+    }
+    let end = start_usize.saturating_add(count).min(source.len());
+    source[start_usize..end].to_vec()
+}
+
+/// Walk `sort_perm` in sorted order, keeping only entries whose physical
+/// index is in `mask`, and return the `[start..start+count)` window. `mask`
+/// must be sorted ascending (it always is — the filter scanner appends rows
+/// in physical order).
+fn compose_filter_over_sort(mask: &[u64], sort_perm: &[u64], start: u64, count: usize) -> Vec<u64> {
+    let mut out = Vec::with_capacity(count);
+    let mut visible_idx: u64 = 0;
+    for &phys in sort_perm.iter() {
+        if mask.binary_search(&phys).is_err() {
+            continue;
+        }
+        if visible_idx >= start {
+            out.push(phys);
+            if out.len() == count {
+                break;
+            }
+        }
+        visible_idx += 1;
+    }
+    out
 }
 
 #[tauri::command]
@@ -308,6 +353,113 @@ struct SortStartParams {
     total_rows: u64,
 }
 
+struct FilterStartParams {
+    source_path: PathBuf,
+    data_start: u64,
+    delimiter: u8,
+    total_rows: u64,
+}
+
+#[tauri::command]
+async fn start_csv_filter(
+    query: String,
+    state: State<'_, AppState>,
+) -> Result<FilterStatus, String> {
+    let document_state = Arc::clone(&state.document);
+    let filter_state = Arc::clone(&state.filter_state);
+    let filter_generation = Arc::clone(&state.filter_generation);
+
+    let trimmed = query.trim().to_owned();
+    if trimmed.is_empty() {
+        // An empty/whitespace query is treated as "clear filter".
+        filter_generation.fetch_add(1, Ordering::SeqCst);
+        let mut s = filter_state.lock();
+        s.clear();
+        let status = s.status.clone();
+        drop(s);
+        return Ok(status);
+    }
+
+    let prepared = {
+        let guard = document_state.lock();
+        let document = guard
+            .as_ref()
+            .ok_or_else(|| csv::CsvError::NoDocument.to_string())?;
+
+        if !document.is_indexing_complete() {
+            return Err("Indexing in progress — wait for it to finish before filtering.".to_owned());
+        }
+
+        FilterStartParams {
+            source_path: document.read_path().to_path_buf(),
+            data_start: document.read_data_start(),
+            delimiter: document.delimiter(),
+            total_rows: document.data_row_count(),
+        }
+    };
+
+    let generation = filter_generation.fetch_add(1, Ordering::SeqCst) + 1;
+
+    {
+        let mut s = filter_state.lock();
+        s.mask = None;
+        s.status = FilterStatus {
+            is_filtering: true,
+            is_ready: false,
+            query: Some(trimmed.clone()),
+            rows_scanned: 0,
+            total_rows: prepared.total_rows,
+            matched_rows: 0,
+            error: None,
+        };
+    }
+
+    let build_options = FilterBuildOptions {
+        source_path: prepared.source_path,
+        data_start: prepared.data_start,
+        delimiter: prepared.delimiter,
+        query: trimmed,
+        total_rows: prepared.total_rows,
+        generation,
+        generation_state: Arc::clone(&filter_generation),
+        state: Arc::clone(&filter_state),
+    };
+
+    let state_for_error = Arc::clone(&filter_state);
+    let generation_for_error = Arc::clone(&filter_generation);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(err) = build_filter(build_options) {
+            if generation_for_error.load(Ordering::SeqCst) == generation {
+                let mut s = state_for_error.lock();
+                s.mask = None;
+                s.status.is_filtering = false;
+                s.status.is_ready = false;
+                s.status.error = Some(err.to_string());
+            }
+        }
+    });
+
+    let status = filter_state.lock().status.clone();
+    Ok(status)
+}
+
+#[tauri::command]
+fn csv_filter_status(state: State<'_, AppState>) -> FilterStatus {
+    let status = state.filter_state.lock().status.clone();
+    status
+}
+
+#[tauri::command]
+fn clear_csv_filter(state: State<'_, AppState>) -> FilterStatus {
+    state.filter_generation.fetch_add(1, Ordering::SeqCst);
+    let mut s = state.filter_state.lock();
+    s.clear();
+    let status = s.status.clone();
+    drop(s);
+    status
+}
+
 #[tauri::command]
 fn startup_csv_path() -> Option<String> {
     std::env::var("CLEAR_ROWS_OPEN_CSV")
@@ -327,6 +479,8 @@ pub fn run() {
             search_progress: Arc::new(Mutex::new(CsvSearchProgress::idle())),
             sort_generation: Arc::new(AtomicU64::new(0)),
             sort_state: Arc::new(Mutex::new(SortState::idle())),
+            filter_generation: Arc::new(AtomicU64::new(0)),
+            filter_state: Arc::new(Mutex::new(FilterState::idle())),
         })
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -340,6 +494,9 @@ pub fn run() {
             start_csv_sort,
             csv_sort_status,
             clear_csv_sort,
+            start_csv_filter,
+            csv_filter_status,
+            clear_csv_filter,
             startup_csv_path
         ])
         .run(tauri::generate_context!())

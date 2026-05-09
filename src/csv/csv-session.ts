@@ -12,6 +12,11 @@ export type ActiveSort = {
   direction: SortDirection;
 };
 
+export type ActiveFilter = {
+  query: string;
+  matchedRows: number;
+};
+
 /**
  * Client-side snapshot of the opened CSV (column layout + row count).
  * Rust remains source of truth for cell data.
@@ -35,6 +40,12 @@ export class CsvSession {
    * order. Mirrored from the Rust sort engine after each sort completes.
    */
   activeSort: ActiveSort | null = null;
+  /**
+   * The currently-applied row filter, or `null` when every row is visible.
+   * When set, `scrollRowCount` reflects `matchedRows` instead of the full
+   * physical row count so the virtual scrollbar sizes to the visible rows.
+   */
+  activeFilter: ActiveFilter | null = null;
 
   applySummary(summary: OpenSummary, colWidthPx: number = CSV_DEFAULT_COL_WIDTH_PX): void {
     this.path = summary.path;
@@ -43,8 +54,9 @@ export class CsvSession {
     this.rowCount = summary.row_count;
     this.scrollRowCount = summary.row_count;
     this.colWidths = summary.headers.map(() => colWidthPx);
-    // Opening a new file invalidates any prior sort state on the backend; mirror that.
+    // Opening a new file invalidates any prior sort/filter state on the backend; mirror that.
     this.activeSort = null;
+    this.activeFilter = null;
   }
 
   applyIndexStatus(status: IndexStatus): {
@@ -57,11 +69,27 @@ export class CsvSession {
 
     this.path = status.path;
     this.rowCount = status.row_count;
-    this.scrollRowCount = status.row_count;
+    // While a filter is active the virtual scrollbar sizes to matched rows,
+    // not the full indexed count — leaving scrollRowCount alone here keeps
+    // the visible extent stable while indexing finishes in the background.
+    if (this.activeFilter === null) {
+      this.scrollRowCount = status.row_count;
+    }
 
     return {
       previousRowCount,
       rowCountChanged: previousRowCount !== this.rowCount,
+      scrollExtentChanged: previousScrollRowCount !== this.scrollRowCount,
+    };
+  }
+
+  applyActiveFilter(filter: ActiveFilter | null): {
+    readonly scrollExtentChanged: boolean;
+  } {
+    const previousScrollRowCount = this.scrollRowCount;
+    this.activeFilter = filter;
+    this.scrollRowCount = filter ? filter.matchedRows : this.rowCount;
+    return {
       scrollExtentChanged: previousScrollRowCount !== this.scrollRowCount,
     };
   }

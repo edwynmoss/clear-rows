@@ -297,11 +297,12 @@ export class CsvGridVirtualizer {
   }
 
   /**
-   * Reset cached row pages and rendered rows after sort state changes. The
-   * row store's keys mix page start with column window, so the same key now
-   * points at different physical rows; we have to drop everything.
+   * Reset cached row pages and rendered rows after the visible-row mapping
+   * changes (sort applied/cleared, filter applied/cleared). The row store's
+   * keys mix page start with column window, so the same key now points at
+   * different physical rows; we have to drop everything.
    */
-  resetRowsForSortChange(): void {
+  resetRowsForVisibilityChange(): void {
     this.refreshGeneration++;
     this.rowStore.clear();
     this.refs.windowRows.replaceChildren();
