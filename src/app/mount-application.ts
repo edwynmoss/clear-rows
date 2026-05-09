@@ -1078,6 +1078,78 @@ export function mountApplication(host: HTMLElement): void {
     void runSortFlow(columnIndex, event.shiftKey);
   });
 
+  grid.scrollRegion.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const cell = target.closest<HTMLElement>("[data-column-index]");
+    if (!cell) {
+      return;
+    }
+    const row = cell.closest<HTMLElement>("[data-row-index]");
+    if (!row) {
+      return;
+    }
+    const columnIndex = Number.parseInt(cell.dataset.columnIndex ?? "", 10);
+    const rowIndex = Number.parseInt(row.dataset.rowIndex ?? "", 10);
+    if (Number.isNaN(columnIndex) || Number.isNaN(rowIndex)) {
+      return;
+    }
+    virtualizer.setHighlightedCell({ rowIndex, columnIndex });
+  });
+
+  async function copyHighlighted(scope: "cell" | "row"): Promise<void> {
+    const sel = virtualizer.getHighlightedCell();
+    if (!sel) {
+      shell.status.setText("Select a cell first (click a cell, or use search/jump).", "negative");
+      return;
+    }
+
+    const visible = session.visibleColumnIndices();
+    if (visible.length === 0) {
+      return;
+    }
+
+    // fetchCsvRows takes a contiguous column span; fetch the smallest range
+    // that covers either the single highlighted column or all visible columns.
+    const colStart = scope === "cell" ? sel.columnIndex : visible[0];
+    const colEnd = scope === "cell" ? sel.columnIndex : visible[visible.length - 1];
+    const colCount = colEnd - colStart + 1;
+
+    try {
+      const batch = await csvApi.fetchCsvRows(sel.rowIndex, 1, colStart, colCount);
+      const row = batch.rows[0];
+      if (!row) {
+        shell.status.setText("Could not read row to copy.", "negative");
+        return;
+      }
+
+      const text =
+        scope === "cell"
+          ? row[0] ?? ""
+          : visible.map((c) => row[c - colStart] ?? "").join("\t");
+
+      await navigator.clipboard.writeText(text);
+
+      if (scope === "cell") {
+        shell.status.setText(
+          `Copied cell R${(sel.rowIndex + 1).toLocaleString()}C${sel.columnIndex + 1}.`,
+          "positive",
+        );
+      } else {
+        shell.status.setText(
+          `Copied row ${(sel.rowIndex + 1).toLocaleString()} (${visible.length} column${
+            visible.length === 1 ? "" : "s"
+          }).`,
+          "positive",
+        );
+      }
+    } catch (err) {
+      shell.status.setText(`Copy error: ${formatError(err)}`, "negative");
+    }
+  }
+
   host.replaceChildren(shell.root);
 
   if (hasDesktopRuntime) {
@@ -1110,6 +1182,31 @@ export function mountApplication(host: HTMLElement): void {
           jumpToRow.open();
         }
       }
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c") {
+      // Don't intercept when the user has a real text selection — let the
+      // browser's native copy carry it. Also ignore inside form inputs.
+      const sel = window.getSelection();
+      const hasTextSelection = sel !== null && sel.toString().length > 0;
+      const target = e.target;
+      const inEditable =
+        target instanceof HTMLElement &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
+
+      if (!session.path || hasTextSelection || inEditable) {
+        return;
+      }
+
+      if (virtualizer.getHighlightedCell() === null) {
+        return;
+      }
+
+      e.preventDefault();
+      // Shift+Ctrl+C copies the entire row as TSV; plain Ctrl+C copies the cell.
+      void copyHighlighted(e.shiftKey ? "row" : "cell");
     }
   });
 

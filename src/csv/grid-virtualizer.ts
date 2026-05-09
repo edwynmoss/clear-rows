@@ -297,6 +297,44 @@ export class CsvGridVirtualizer {
   }
 
   /**
+   * Update the click-driven highlighted cell. Used by the host to wire
+   * pointer selection to the same highlight visuals as `scrollToCell`.
+   * Pass `null` to clear the selection.
+   */
+  setHighlightedCell(cell: { rowIndex: number; columnIndex: number } | null): void {
+    if (cell === null) {
+      if (this.highlightedCell === null) return;
+      this.highlightedCell = null;
+      this.scheduleRefresh();
+      return;
+    }
+
+    const rowIndex = Math.min(
+      Math.max(0, Math.floor(cell.rowIndex)),
+      Math.max(0, this.session.rowCount - 1),
+    );
+    const columnIndex = Math.min(
+      Math.max(0, Math.floor(cell.columnIndex)),
+      Math.max(0, this.session.headers.length - 1),
+    );
+
+    if (
+      this.highlightedCell !== null &&
+      this.highlightedCell.rowIndex === rowIndex &&
+      this.highlightedCell.columnIndex === columnIndex
+    ) {
+      return;
+    }
+
+    this.highlightedCell = { rowIndex, columnIndex };
+    this.scheduleRefresh();
+  }
+
+  getHighlightedCell(): { rowIndex: number; columnIndex: number } | null {
+    return this.highlightedCell;
+  }
+
+  /**
    * Reset cached row pages and rendered rows after the visible-row mapping
    * changes (sort applied/cleared, filter applied/cleared). The row store's
    * keys mix page start with column window, so the same key now points at
@@ -307,6 +345,9 @@ export class CsvGridVirtualizer {
     this.rowStore.clear();
     this.refs.windowRows.replaceChildren();
     this.rowPool = [];
+    // The same scroll-row index now points at a different physical row, so
+    // a stale cell highlight would mislead the user about what they copy.
+    this.highlightedCell = null;
     this.scheduleRefresh();
   }
 
