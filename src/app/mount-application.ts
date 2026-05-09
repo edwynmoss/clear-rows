@@ -7,6 +7,7 @@ import { createCsvPreviewGrid } from "../components/csv-preview-grid";
 import { createColumnVisibilityControl } from "../components/column-visibility-control";
 import { createCsvSearchPanel } from "../components/csv-search-panel";
 import { createExportButton } from "../components/export-button";
+import { createJumpToRow } from "../components/jump-to-row";
 import { createReopenAsControl } from "../components/reopen-as-control";
 import { createSearchResultsTable } from "../components/search-results-table";
 import { createThemeToggle } from "../components/theme-toggle";
@@ -131,6 +132,41 @@ export function mountApplication(host: HTMLElement): void {
       void runClearFilter();
     },
   });
+
+  const jumpToRow = createJumpToRow({
+    onApply: (rowNumber) => {
+      void runJumpToRow(rowNumber);
+    },
+  });
+
+  async function runJumpToRow(rowNumber: number): Promise<void> {
+    if (!session.path) {
+      return;
+    }
+
+    const max = Math.max(0, session.scrollRowCount);
+    if (max === 0) {
+      jumpToRow.setStatus("No rows to jump to.", "negative");
+      return;
+    }
+
+    if (rowNumber < 1 || rowNumber > max) {
+      jumpToRow.setStatus(
+        `Row ${rowNumber.toLocaleString()} is out of range (1–${max.toLocaleString()}).`,
+        "negative",
+      );
+      return;
+    }
+
+    try {
+      // 1-indexed in the UI; scrollToCell takes a 0-indexed scroll-row position.
+      await virtualizer.scrollToCell(rowNumber - 1, 0);
+      shell.status.setText(`Jumped to row ${rowNumber.toLocaleString()}.`, "positive");
+      jumpToRow.close();
+    } catch (err) {
+      jumpToRow.setStatus(formatError(err), "negative");
+    }
+  }
 
   async function runFilterFlow(query: string): Promise<void> {
     if (!session.path || isOpening) {
@@ -624,6 +660,8 @@ export function mountApplication(host: HTMLElement): void {
       exportButton.setEnabled(true);
       columnVisibilityControl.setColumns(session.headers, session.hiddenColumns);
       columnVisibilityControl.setEnabled(true);
+      jumpToRow.close();
+      jumpToRow.setMaxRow(session.scrollRowCount);
       return;
     }
 
@@ -634,6 +672,7 @@ export function mountApplication(host: HTMLElement): void {
     filterBar.setVisible(false);
     exportButton.setEnabled(false);
     columnVisibilityControl.setEnabled(false);
+    jumpToRow.close();
   }
 
   function revealSearchResults(): void {
@@ -643,6 +682,7 @@ export function mountApplication(host: HTMLElement): void {
     filterBar.setVisible(false);
     exportButton.setEnabled(false);
     columnVisibilityControl.setEnabled(false);
+    jumpToRow.close();
   }
 
   async function runOpenFlow(): Promise<void> {
@@ -1018,7 +1058,7 @@ export function mountApplication(host: HTMLElement): void {
     },
   });
 
-  workspace.append(empty.root, filterBar.root, grid.root, searchResults.root);
+  workspace.append(empty.root, filterBar.root, jumpToRow.root, grid.root, searchResults.root);
   shell.gridHost.append(searchPanel.root, workspace);
   virtualizer.bind();
 
@@ -1057,6 +1097,18 @@ export function mountApplication(host: HTMLElement): void {
       if (session.path) {
         e.preventDefault();
         filterBar.focus();
+      }
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "g") {
+      if (session.path) {
+        e.preventDefault();
+        jumpToRow.setMaxRow(session.scrollRowCount);
+        if (jumpToRow.isOpen()) {
+          jumpToRow.close();
+        } else {
+          jumpToRow.open();
+        }
       }
     }
   });
