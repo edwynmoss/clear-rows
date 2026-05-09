@@ -16,7 +16,8 @@
         "title": "Clear Rows",
         "width": 1120,
         "height": 720,
-        "resizable": true
+        "resizable": true,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,SmoothScrolling,WindowsScrollingPersonality --disable-smooth-scrolling --disable-threaded-scrolling"
       }
     ],
     "security": {

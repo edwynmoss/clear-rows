@@ -4,6 +4,7 @@ import { createAppShell } from "../components/app-shell";
 import { createCsvEmptyState } from "../components/csv-empty-state";
 import { createCsvPreviewGrid } from "../components/csv-preview-grid";
 import { createCsvSearchPanel } from "../components/csv-search-panel";
+import { createReopenAsControl } from "../components/reopen-as-control";
 import { createSearchResultsTable } from "../components/search-results-table";
 import { createThemeToggle } from "../components/theme-toggle";
 import {
@@ -19,6 +20,7 @@ import { CsvSession } from "../csv/csv-session";
 import * as csvApi from "../csv/csv-api";
 import { isDesktopRuntime } from "../tauri/runtime";
 import type { CsvFileProfileResult, CsvSearchMatch, CsvSearchProgress } from "../types/csv";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 const JUMP_POLL_INTERVAL_MS = 200;
 const SEARCH_PROGRESS_POLL_INTERVAL_MS = 200;
@@ -83,17 +85,68 @@ export function mountApplication(host: HTMLElement): void {
     },
   });
 
+  const reopenAsControl = createReopenAsControl({
+    onApply: ({ delimiter, encoding }) => {
+      void runReopenAs(delimiter, encoding);
+    },
+  });
+
+  async function runReopenAs(delimiter: string, encoding: string): Promise<void> {
+    if (!session.path || isOpening) {
+      return;
+    }
+
+    resultJumpGeneration++;
+    isOpening = true;
+    try {
+      await openCsvFromPath(
+        session.path,
+        shell.status,
+        session,
+        virtualizer,
+        {
+          onDatasetOpened: revealDataset,
+          onProgress: (ratio) => shell.progress.setProgress(ratio),
+        },
+        { delimiterOverride: delimiter, encodingOverride: encoding },
+      );
+    } finally {
+      isOpening = false;
+    }
+  }
+
+  function syncReopenAsControl(): void {
+    if (!session.path || !session.profile) {
+      reopenAsControl.setEnabled(false);
+      return;
+    }
+
+    const delimiterChar =
+      typeof session.profile.delimiter === "number"
+        ? String.fromCharCode(session.profile.delimiter)
+        : null;
+    reopenAsControl.setDefaults({
+      delimiterChar,
+      encoding: session.profile.encoding,
+    });
+    reopenAsControl.setEnabled(true);
+  }
+
   function revealDataset(): void {
     searchResults.root.classList.add("hidden");
 
     if (session.path) {
       empty.root.classList.add("hidden");
       grid.root.classList.remove("hidden");
+      shell.setSubtitleVisible(false);
+      syncReopenAsControl();
       return;
     }
 
     grid.root.classList.add("hidden");
     empty.root.classList.remove("hidden");
+    shell.setSubtitleVisible(true);
+    reopenAsControl.setEnabled(false);
   }
 
   function revealSearchResults(): void {
@@ -112,6 +165,7 @@ export function mountApplication(host: HTMLElement): void {
     try {
       await openCsvFromDialog(shell.status, session, virtualizer, {
         onDatasetOpened: revealDataset,
+        onProgress: (ratio) => shell.progress.setProgress(ratio),
       });
     } finally {
       isOpening = false;
@@ -129,6 +183,7 @@ export function mountApplication(host: HTMLElement): void {
       try {
         await openCsvFromPath(path, shell.status, session, virtualizer, {
           onDatasetOpened: revealDataset,
+          onProgress: (ratio) => shell.progress.setProgress(ratio),
         });
       } finally {
         isOpening = false;
@@ -308,6 +363,7 @@ export function mountApplication(host: HTMLElement): void {
         try {
           await openCsvFromPath(match.path, shell.status, session, virtualizer, {
             onDatasetOpened: revealDataset,
+            onProgress: (ratio) => shell.progress.setProgress(ratio),
           });
         } finally {
           isOpening = false;
@@ -449,7 +505,7 @@ export function mountApplication(host: HTMLElement): void {
     subtitle: "Large-file preview and search",
     version: __APP_VERSION__,
     footerTagline: "Local desktop",
-    headerExtras: [createThemeToggle()],
+    headerExtras: [reopenAsControl.root, createThemeToggle()],
     onOpenCsv: () => {
       void runOpenFlow();
     },
@@ -463,6 +519,7 @@ export function mountApplication(host: HTMLElement): void {
 
   if (hasDesktopRuntime) {
     void openStartupCsvIfConfigured();
+    wireFileDrop();
   }
 
   window.addEventListener("keydown", (e: KeyboardEvent) => {
@@ -471,4 +528,38 @@ export function mountApplication(host: HTMLElement): void {
       void runOpenFlow();
     }
   });
+
+  function wireFileDrop(): void {
+    void getCurrentWebview().onDragDropEvent((event) => {
+      const payload = event.payload;
+      if (payload.type === "over" || payload.type === "enter") {
+        empty.root.dataset.dragOver = "true";
+        return;
+      }
+
+      empty.root.removeAttribute("data-drag-over");
+
+      if (payload.type !== "drop" || isOpening) {
+        return;
+      }
+
+      const path = payload.paths.find((candidate) => candidate.length > 0);
+      if (!path) {
+        return;
+      }
+
+      resultJumpGeneration++;
+      isOpening = true;
+      (async () => {
+        try {
+          await openCsvFromPath(path, shell.status, session, virtualizer, {
+            onDatasetOpened: revealDataset,
+            onProgress: (ratio) => shell.progress.setProgress(ratio),
+          });
+        } finally {
+          isOpening = false;
+        }
+      })();
+    });
+  }
 }

@@ -27,6 +27,13 @@ async function pickCsvPath(): Promise<string | null> {
 
 export type OpenCsvCallbacks = {
   onDatasetOpened?: () => void;
+  /** Called with the indexing ratio in [0,1] while indexing, and `null` once finished or on error. */
+  onProgress?: (ratio: number | null) => void;
+};
+
+export type OpenCsvFlowOptions = {
+  delimiterOverride?: string;
+  encodingOverride?: string;
 };
 
 export async function openCsvFromDialog(
@@ -40,7 +47,7 @@ export async function openCsvFromDialog(
     return;
   }
 
-  status.setText("Choose a UTF-8 CSV file…", "neutral");
+  status.setText("Choose a CSV, TSV, or delimited text file…", "neutral");
 
   try {
     const path = await pickCsvPath();
@@ -62,12 +69,17 @@ export async function openCsvFromPath(
   session: CsvSession,
   virtualizer: CsvGridVirtualizer,
   callbacks?: OpenCsvCallbacks,
+  options?: OpenCsvFlowOptions,
 ): Promise<void> {
   const generation = ++openGeneration;
   status.setText("Indexing… this may take a moment on large files.", "busy");
+  callbacks?.onProgress?.(0);
 
   try {
-    const summary = await csvApi.openCsv(path);
+    const summary = await csvApi.openCsv(path, {
+      delimiterOverride: options?.delimiterOverride,
+      encodingOverride: options?.encodingOverride,
+    });
     if (generation !== openGeneration) {
       return;
     }
@@ -81,13 +93,15 @@ export async function openCsvFromPath(
     callbacks?.onDatasetOpened?.();
 
     status.setText(formatOpenStatus(summary, session.headers.length), "busy");
+    callbacks?.onProgress?.(progressRatio(summary.indexed_bytes, summary.file_size));
 
     if (summary.is_complete || summary.error) {
       status.setText(formatOpenStatus(summary, session.headers.length), getOpenStatusTone(summary));
+      callbacks?.onProgress?.(null);
       return;
     }
 
-    void pollIndexStatus(generation, status, session, virtualizer);
+    void pollIndexStatus(generation, status, session, virtualizer, callbacks);
   } catch (err) {
     if (generation !== openGeneration) {
       return;
@@ -95,6 +109,7 @@ export async function openCsvFromPath(
 
     console.error(err);
     status.setText(`Error: ${formatError(err)}`, "negative");
+    callbacks?.onProgress?.(null);
   }
 }
 
@@ -103,6 +118,7 @@ async function pollIndexStatus(
   status: StatusBanner,
   session: CsvSession,
   virtualizer: CsvGridVirtualizer,
+  callbacks?: OpenCsvCallbacks,
 ): Promise<void> {
   while (generation === openGeneration) {
     await wait(INDEX_POLL_INTERVAL_MS);
@@ -131,8 +147,10 @@ async function pollIndexStatus(
         formatIndexStatus(indexStatus, session.headers.length, session.profile),
         getIndexStatusTone(indexStatus, session.profile),
       );
+      callbacks?.onProgress?.(progressRatio(indexStatus.indexed_bytes, indexStatus.file_size));
 
       if (indexStatus.is_complete || indexStatus.error) {
+        callbacks?.onProgress?.(null);
         return;
       }
     } catch (err) {
@@ -140,9 +158,18 @@ async function pollIndexStatus(
         console.error(err);
         status.setText(`Index status error: ${formatError(err)}`, "negative");
       }
+      callbacks?.onProgress?.(null);
       return;
     }
   }
+}
+
+function progressRatio(indexedBytes: number, fileSize: number): number | null {
+  if (fileSize <= 0) {
+    return null;
+  }
+
+  return Math.min(1, Math.max(0, indexedBytes / fileSize));
 }
 
 function formatOpenStatus(summary: OpenSummary, columnCount: number): string {
@@ -229,15 +256,13 @@ function formatFileProfile(
     return formatDelimiterCode(delimiter);
   }
 
-  const kind = profile.detected_kind_label;
-  const delimiterLabel = profile.delimiter_label
-    ? `${formatLabel(profile.delimiter_label)}-delimited`
-    : "";
-  const parts = [
-    delimiterLabel ? `${delimiterLabel} ${kind}` : kind,
+  const kindLabel =
     profile.delimiter_confidence !== "high"
-      ? `${formatLabel(profile.delimiter_confidence)} confidence`
-      : "",
+      ? `${profile.detected_kind_label} (${profile.delimiter_confidence} confidence)`
+      : profile.detected_kind_label;
+  const parts = [
+    kindLabel,
+    profile.delimiter_label ?? undefined,
     formatEncoding(profile.encoding),
   ].filter((part): part is string => Boolean(part));
 
@@ -294,13 +319,11 @@ function formatEncoding(encoding: string): string {
     "utf-8": "UTF-8",
     "utf-8-bom": "UTF-8 BOM",
     "utf-8-lossy": "UTF-8 lossy",
+    "utf-16-le": "UTF-16 LE",
+    "utf-16-be": "UTF-16 BE",
   };
 
   return labels[encoding] ?? encoding.toUpperCase();
-}
-
-function formatLabel(value: string): string {
-  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 function formatProgress(indexedBytes: number, fileSize: number): string {
