@@ -11,7 +11,7 @@ import type {
   IndexStatus,
   OpenSummary,
   RowBatch,
-  SortDirection,
+  SortKey,
   SortStatus,
 } from "../types/csv";
 
@@ -89,14 +89,10 @@ export async function cancelCsvSearch(): Promise<CsvSearchProgress> {
   return invoke<CsvSearchProgress>("cancel_csv_search");
 }
 
-export async function startCsvSort(
-  columnIndex: number,
-  direction: SortDirection,
-): Promise<SortStatus> {
+export async function startCsvSort(keys: SortKey[]): Promise<SortStatus> {
   requireDesktopRuntime("Sorting CSV rows requires the desktop runtime");
   return invoke<SortStatus>("start_csv_sort", {
-    columnIndex,
-    direction,
+    keys,
   });
 }
 

@@ -1,10 +1,10 @@
 mod csv;
 
 use csv::{
-    build_export, build_filter, build_sort, CsvDocument, CsvFileProfile, CsvSearchProgress,
+    build_export, build_filter, build_sort, CsvDocument, CsvFileProfile, CsvSearchProgress, SortKey,
     CsvSearchSummary, ExportBuildOptions, ExportState, ExportStatus, FilterBuildOptions,
     FilterState, FilterStatus, IndexStatus, OpenOptions, OpenSummary, RowBatch, SortBuildOptions,
-    SortDirection, SortState, SortStatus,
+    SortState, SortStatus,
 };
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -252,13 +252,16 @@ fn cancel_csv_search(state: State<'_, AppState>) -> CsvSearchProgress {
 
 #[tauri::command]
 async fn start_csv_sort(
-    column_index: usize,
-    direction: SortDirection,
+    keys: Vec<SortKey>,
     state: State<'_, AppState>,
 ) -> Result<SortStatus, String> {
     let document_state = Arc::clone(&state.document);
     let sort_state = Arc::clone(&state.sort_state);
     let sort_generation = Arc::clone(&state.sort_generation);
+
+    if keys.is_empty() {
+        return Err("At least one sort key is required.".to_owned());
+    }
 
     let prepared = {
         let guard = document_state.lock();
@@ -270,8 +273,11 @@ async fn start_csv_sort(
             return Err("Indexing in progress — wait for it to finish before sorting.".to_owned());
         }
 
-        if column_index >= document.summarize().headers.len() {
-            return Err("Column index out of range.".to_owned());
+        let headers_len = document.summarize().headers.len();
+        for key in &keys {
+            if key.column >= headers_len {
+                return Err("Column index out of range.".to_owned());
+            }
         }
 
         SortStartParams {
@@ -294,8 +300,7 @@ async fn start_csv_sort(
         s.status = SortStatus {
             is_sorting: true,
             is_ready: false,
-            column: Some(column_index),
-            direction: Some(direction),
+            keys: keys.clone(),
             rows_scanned: 0,
             total_rows: prepared.total_rows,
             error: None,
@@ -306,8 +311,7 @@ async fn start_csv_sort(
         source_path: prepared.source_path,
         data_start: prepared.data_start,
         delimiter: prepared.delimiter,
-        column: column_index,
-        direction,
+        keys,
         spill_dir,
         generation,
         generation_state: Arc::clone(&sort_generation),

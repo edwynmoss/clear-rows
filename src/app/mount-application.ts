@@ -28,9 +28,10 @@ import type {
   CsvSearchProgress,
   ExportStatus,
   FilterStatus,
-  SortDirection,
+  SortKey,
   SortStatus,
 } from "../types/csv";
+import type { ActiveSort } from "../csv/csv-session";
 import { save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
@@ -265,7 +266,7 @@ export function mountApplication(host: HTMLElement): void {
     return `${matched.toLocaleString()} of ${total.toLocaleString()} rows match`;
   }
 
-  async function runSortFlow(columnIndex: number): Promise<void> {
+  async function runSortFlow(columnIndex: number, addToCurrent: boolean): Promise<void> {
     if (!session.path || isOpening) {
       return;
     }
@@ -275,15 +276,15 @@ export function mountApplication(host: HTMLElement): void {
     }
 
     const generation = ++sortGeneration;
-    const direction = nextSortDirection(session.activeSort, columnIndex);
+    const nextKeys = nextSortKeys(session.activeSort, columnIndex, addToCurrent);
 
-    if (direction === null) {
+    if (nextKeys.length === 0) {
       try {
         await csvApi.clearCsvSort();
         if (generation !== sortGeneration) {
           return;
         }
-        session.activeSort = null;
+        session.activeSort = [];
         virtualizer.setPendingSortColumn(null);
         virtualizer.resetRowsForVisibilityChange();
         shell.status.setText("Sort cleared.", "neutral");
@@ -296,12 +297,14 @@ export function mountApplication(host: HTMLElement): void {
       return;
     }
 
-    const columnName = session.headers[columnIndex] || `column ${columnIndex + 1}`;
+    const summary = describeSortKeys(nextKeys, session.headers);
+    // The pending indicator only marks the column the user just clicked, even
+    // when the sort is multi-key — the others retain their existing arrows.
     virtualizer.setPendingSortColumn(columnIndex);
-    shell.status.setText(`Sorting by ${columnName} (${direction})…`, "busy");
+    shell.status.setText(`Sorting ${summary}…`, "busy");
 
     try {
-      await csvApi.startCsvSort(columnIndex, direction);
+      await csvApi.startCsvSort(nextKeys);
     } catch (err) {
       if (generation === sortGeneration) {
         virtualizer.setPendingSortColumn(null);
@@ -311,15 +314,14 @@ export function mountApplication(host: HTMLElement): void {
       return;
     }
 
-    await pollSortStatus(generation, columnIndex, direction, columnName);
+    await pollSortStatus(generation, nextKeys);
   }
 
   async function pollSortStatus(
     generation: number,
-    columnIndex: number,
-    direction: SortDirection,
-    columnName: string,
+    keys: SortKey[],
   ): Promise<void> {
+    const summary = describeSortKeys(keys, session.headers);
     while (generation === sortGeneration) {
       let status: SortStatus;
       try {
@@ -344,11 +346,11 @@ export function mountApplication(host: HTMLElement): void {
       }
 
       if (status.is_ready && !status.is_sorting) {
-        session.activeSort = { column: columnIndex, direction };
+        session.activeSort = status.keys.length > 0 ? status.keys : keys;
         virtualizer.setPendingSortColumn(null);
         virtualizer.resetRowsForVisibilityChange();
         shell.status.setText(
-          `Sorted by ${columnName} (${direction}) · ${status.total_rows.toLocaleString()} rows.`,
+          `Sorted ${summary} · ${status.total_rows.toLocaleString()} rows.`,
           "positive",
         );
         return;
@@ -360,32 +362,75 @@ export function mountApplication(host: HTMLElement): void {
         return;
       }
 
-      shell.status.setText(formatSortProgress(status, columnName), "busy");
+      shell.status.setText(formatSortProgress(status, summary), "busy");
       await wait(SORT_PROGRESS_POLL_INTERVAL_MS);
     }
   }
 
-  function nextSortDirection(
-    activeSort: { column: number; direction: SortDirection } | null,
+  /**
+   * Compute the next sort key list given the current active keys, the clicked
+   * column, and whether shift was held.
+   *
+   * - Plain click: replaces the entire sort with that column. If the column is
+   *   already the sole primary key, cycles asc → desc → cleared.
+   * - Shift+click: adds the column as a secondary key (or cycles its direction
+   *   if it's already in the list). Removing the only remaining key clears.
+   */
+  function nextSortKeys(
+    activeSort: ActiveSort,
     columnIndex: number,
-  ): SortDirection | null {
-    // Cycle: unsorted -> asc -> desc -> unsorted (per column).
-    if (!activeSort || activeSort.column !== columnIndex) {
-      return "asc";
+    addToCurrent: boolean,
+  ): SortKey[] {
+    if (!addToCurrent) {
+      const isSoleKey =
+        activeSort.length === 1 && activeSort[0].column === columnIndex;
+      if (!isSoleKey) {
+        return [{ column: columnIndex, direction: "asc" }];
+      }
+      // Sole primary: cycle asc → desc → cleared.
+      if (activeSort[0].direction === "asc") {
+        return [{ column: columnIndex, direction: "desc" }];
+      }
+      return [];
     }
-    if (activeSort.direction === "asc") {
-      return "desc";
+
+    // Shift+click: cycle direction or remove if already at end of cycle.
+    const existingIndex = activeSort.findIndex((k) => k.column === columnIndex);
+    if (existingIndex < 0) {
+      return [...activeSort, { column: columnIndex, direction: "asc" }];
     }
-    return null;
+    const existing = activeSort[existingIndex];
+    const next = activeSort.slice();
+    if (existing.direction === "asc") {
+      next[existingIndex] = { column: columnIndex, direction: "desc" };
+      return next;
+    }
+    // Remove this key — its direction cycle has wrapped.
+    next.splice(existingIndex, 1);
+    return next;
   }
 
-  function formatSortProgress(status: SortStatus, columnName: string): string {
+  function describeSortKeys(keys: SortKey[], headers: string[]): string {
+    if (keys.length === 0) {
+      return "no columns";
+    }
+    const parts = keys.map((key) => {
+      const name = headers[key.column] || `column ${key.column + 1}`;
+      return `${name} (${key.direction})`;
+    });
+    if (parts.length === 1) {
+      return `by ${parts[0]}`;
+    }
+    return `by ${parts.join(", then ")}`;
+  }
+
+  function formatSortProgress(status: SortStatus, summary: string): string {
     const rows = status.rows_scanned.toLocaleString();
     const total = status.total_rows > 0 ? status.total_rows.toLocaleString() : null;
     if (total !== null) {
-      return `Sorting by ${columnName} · ${rows} of ${total} rows scanned…`;
+      return `Sorting ${summary} · ${rows} of ${total} rows scanned…`;
     }
-    return `Sorting by ${columnName} · ${rows} rows scanned…`;
+    return `Sorting ${summary} · ${rows} rows scanned…`;
   }
 
   async function runExportFlow(): Promise<void> {
@@ -498,7 +543,7 @@ export function mountApplication(host: HTMLElement): void {
   function suggestExportFileName(
     sourcePath: string,
     filter: { query: string } | null,
-    sort: { column: number; direction: SortDirection } | null,
+    sort: ActiveSort,
   ): string {
     const sep = sourcePath.includes("\\") ? "\\" : "/";
     const base = sourcePath.split(sep).pop() ?? "export.csv";
@@ -506,7 +551,11 @@ export function mountApplication(host: HTMLElement): void {
     const stem = dot > 0 ? base.slice(0, dot) : base;
     const tags: string[] = [];
     if (filter) tags.push("filtered");
-    if (sort) tags.push(`sorted-${sort.direction}`);
+    if (sort.length === 1) {
+      tags.push(`sorted-${sort[0].direction}`);
+    } else if (sort.length > 1) {
+      tags.push("sorted");
+    }
     const suffix = tags.length > 0 ? `-${tags.join("-")}` : "-export";
     return `${stem}${suffix}.csv`;
   }
@@ -986,7 +1035,7 @@ export function mountApplication(host: HTMLElement): void {
     if (Number.isNaN(columnIndex)) {
       return;
     }
-    void runSortFlow(columnIndex);
+    void runSortFlow(columnIndex, event.shiftKey);
   });
 
   host.replaceChildren(shell.root);

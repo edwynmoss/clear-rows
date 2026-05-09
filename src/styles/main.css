@@ -1089,6 +1089,23 @@
     }
   }
 
+  .dp-grid-header-sort-priority {
+    align-items: center;
+    background: color-mix(in oklab, var(--semantic-accent-soft), transparent 20%);
+    border-radius: 999px;
+    color: var(--semantic-accent);
+    display: inline-flex;
+    flex: 0 0 auto;
+    font-size: 0.6rem;
+    font-weight: 600;
+    height: 14px;
+    justify-content: center;
+    line-height: 1;
+    margin-left: 0.15rem;
+    min-width: 14px;
+    padding: 0 0.25rem;
+  }
+
   .dp-status {
     background: color-mix(in oklab, var(--semantic-surface), var(--semantic-background) 30%);
     border: 1px solid color-mix(in oklab, var(--semantic-border), transparent 38%);
