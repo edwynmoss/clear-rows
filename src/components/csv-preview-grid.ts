@@ -69,8 +69,12 @@ export function createCsvPreviewGrid(options: CsvPreviewGridOptions = {}): CsvPr
 }
 
 export type RenderHeaderOptions = {
-  /** Active sort state to render as an arrow indicator on the matching column. */
-  activeSort?: ActiveSort | null;
+  /**
+   * Active sort keys in priority order. The header for each referenced column
+   * gets an arrow indicator and, when more than one key is present, a small
+   * priority badge so users can tell primary from secondary at a glance.
+   */
+  activeSort?: ActiveSort;
   /** Column whose sort is currently being computed. Rendered with a busy hint. */
   pendingSortColumn?: number | null;
 };
@@ -119,8 +123,12 @@ export function renderCsvHeaderRow(
     cell.append(label);
 
     const isPending = options.pendingSortColumn === i;
-    const direction =
-      options.activeSort?.column === i && !isPending ? options.activeSort.direction : null;
+    const sortKeys = options.activeSort ?? [];
+    const sortKeyIndex = isPending
+      ? -1
+      : sortKeys.findIndex((key) => key.column === i);
+    const direction = sortKeyIndex >= 0 ? sortKeys[sortKeyIndex].direction : null;
+    const showPriority = !isPending && sortKeys.length > 1 && sortKeyIndex >= 0;
 
     if (isPending || direction !== null) {
       const indicator = document.createElement("span");
@@ -134,6 +142,14 @@ export function renderCsvHeaderRow(
         indicator.textContent = direction === "asc" ? "▲" : "▼";
       }
       cell.append(indicator);
+
+      if (showPriority) {
+        const badge = document.createElement("span");
+        badge.className = "dp-grid-header-sort-priority";
+        badge.setAttribute("aria-hidden", "true");
+        badge.textContent = String(sortKeyIndex + 1);
+        cell.append(badge);
+      }
     }
 
     if (isPending) {

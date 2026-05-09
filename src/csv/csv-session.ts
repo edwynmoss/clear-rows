@@ -2,15 +2,17 @@ import type {
   CsvFileProfile,
   IndexStatus,
   OpenSummary,
-  SortDirection,
+  SortKey,
 } from "../types/csv";
 
 import { CSV_DEFAULT_COL_WIDTH_PX } from "../app/constants";
 
-export type ActiveSort = {
-  column: number;
-  direction: SortDirection;
-};
+/**
+ * Active sort is an ordered list of sort keys. Index 0 is the primary key,
+ * later entries are progressively weaker tiebreakers. An empty array means
+ * rows are shown in their natural order.
+ */
+export type ActiveSort = SortKey[];
 
 export type ActiveFilter = {
   query: string;
@@ -36,10 +38,11 @@ export class CsvSession {
   scrollRowCount = 0;
   colWidths: number[] = [];
   /**
-   * The currently-applied sort, or `null` when rows are shown in their natural
-   * order. Mirrored from the Rust sort engine after each sort completes.
+   * The currently-applied sort keys in priority order, or an empty array when
+   * rows are shown in their natural order. Mirrored from the Rust sort engine
+   * after each sort completes.
    */
-  activeSort: ActiveSort | null = null;
+  activeSort: ActiveSort = [];
   /**
    * The currently-applied row filter, or `null` when every row is visible.
    * When set, `scrollRowCount` reflects `matchedRows` instead of the full
@@ -61,7 +64,7 @@ export class CsvSession {
     this.scrollRowCount = summary.row_count;
     this.colWidths = summary.headers.map(() => colWidthPx);
     // Opening a new file invalidates any prior sort/filter state on the backend; mirror that.
-    this.activeSort = null;
+    this.activeSort = [];
     this.activeFilter = null;
     this.hiddenColumns = new Set();
   }
