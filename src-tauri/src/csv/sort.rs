@@ -18,9 +18,10 @@ use super::CsvError;
 /// row-scan time but heap merge stays cheap.
 const KEYS_PER_CHUNK: usize = 250_000;
 
-/// Rows sampled (cheaply) at the start of a sort to decide whether the column
-/// behaves as numeric or text. Anything beyond a couple thousand rows changes
-/// the verdict only at the margins and adds noticeable latency to short sorts.
+/// Rows sampled (cheaply) at the start of a sort to decide whether each
+/// referenced column behaves as numeric or text. Anything beyond a couple
+/// thousand rows changes the verdict only at the margins and adds noticeable
+/// latency to short sorts.
 const SAMPLE_ROWS_FOR_MODE: usize = 2_000;
 
 /// Fraction of non-empty samples that must parse as f64 for us to treat the
@@ -41,6 +42,12 @@ pub enum SortDirection {
     Desc,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SortKey {
+    pub column: usize,
+    pub direction: SortDirection,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SortMode {
     Numeric,
@@ -51,8 +58,9 @@ enum SortMode {
 pub struct SortStatus {
     pub is_sorting: bool,
     pub is_ready: bool,
-    pub column: Option<usize>,
-    pub direction: Option<SortDirection>,
+    /// Active sort keys in priority order (primary first). Empty when no sort
+    /// is active or when a build is in progress and has not yet finalized.
+    pub keys: Vec<SortKey>,
     pub rows_scanned: u64,
     pub total_rows: u64,
     pub error: Option<String>,
@@ -81,8 +89,7 @@ pub struct SortBuildOptions {
     pub source_path: PathBuf,
     pub data_start: u64,
     pub delimiter: u8,
-    pub column: usize,
-    pub direction: SortDirection,
+    pub keys: Vec<SortKey>,
     pub spill_dir: PathBuf,
     pub generation: u64,
     pub generation_state: Arc<AtomicU64>,
@@ -94,23 +101,33 @@ pub fn build_sort(options: SortBuildOptions) -> Result<(), CsvError> {
         source_path,
         data_start,
         delimiter,
-        column,
-        direction,
+        keys,
         spill_dir,
         generation,
         generation_state,
         state,
     } = options;
 
+    if keys.is_empty() {
+        return Ok(());
+    }
+
     // Fresh spill directory per build. Best-effort cleanup on any prior run.
     let _ = fs::remove_dir_all(&spill_dir);
     fs::create_dir_all(&spill_dir)?;
 
-    let mode = detect_mode(&source_path, data_start, delimiter, column)?;
-    if !is_active(&generation_state, generation) {
-        let _ = fs::remove_dir_all(&spill_dir);
-        return Ok(());
+    // Detect the per-column mode once up front so the row-scan loop can avoid
+    // re-deciding numeric vs text on every value.
+    let mut modes: Vec<SortMode> = Vec::with_capacity(keys.len());
+    for key in &keys {
+        modes.push(detect_mode(&source_path, data_start, delimiter, key.column)?);
+        if !is_active(&generation_state, generation) {
+            let _ = fs::remove_dir_all(&spill_dir);
+            return Ok(());
+        }
     }
+
+    let directions: Vec<SortDirection> = keys.iter().map(|k| k.direction).collect();
 
     let mut parser = open_parser(&source_path, data_start, delimiter)?;
     parser.try_skip_row()?; // header
@@ -131,10 +148,13 @@ pub fn build_sort(options: SortBuildOptions) -> Result<(), CsvError> {
             None => break,
         };
 
-        let raw = row.get(column).map(String::as_str).unwrap_or("");
-        let key = encode_key(raw, mode);
+        let mut sub_keys: Vec<Vec<u8>> = Vec::with_capacity(keys.len());
+        for (key, mode) in keys.iter().zip(modes.iter()) {
+            let raw = row.get(key.column).map(String::as_str).unwrap_or("");
+            sub_keys.push(encode_key(raw, *mode));
+        }
         buffer.push(EncodedKey {
-            key,
+            sub_keys,
             phys: phys_idx,
         });
 
@@ -146,7 +166,7 @@ pub fn build_sort(options: SortBuildOptions) -> Result<(), CsvError> {
         }
 
         if buffer.len() >= KEYS_PER_CHUNK {
-            buffer.sort_unstable_by(EncodedKey::cmp);
+            buffer.sort_unstable_by(|a, b| cmp_with_directions(a, b, &directions));
             let path = spill_dir.join(format!("chunk-{:05}.bin", chunk_paths.len()));
             write_chunk(&path, &buffer)?;
             chunk_paths.push(path);
@@ -162,25 +182,20 @@ pub fn build_sort(options: SortBuildOptions) -> Result<(), CsvError> {
     state.lock().status.rows_scanned = total_scanned;
 
     let permutation = if chunk_paths.is_empty() {
-        buffer.sort_unstable_by(EncodedKey::cmp);
+        buffer.sort_unstable_by(|a, b| cmp_with_directions(a, b, &directions));
         buffer.into_iter().map(|k| k.phys).collect::<Vec<u64>>()
     } else {
         if !buffer.is_empty() {
-            buffer.sort_unstable_by(EncodedKey::cmp);
+            buffer.sort_unstable_by(|a, b| cmp_with_directions(a, b, &directions));
             let path = spill_dir.join(format!("chunk-{:05}.bin", chunk_paths.len()));
             write_chunk(&path, &buffer)?;
             chunk_paths.push(path);
             buffer.clear();
         }
-        let merged = merge_chunks(&chunk_paths, total_scanned)?;
+        let merged = merge_chunks(&chunk_paths, total_scanned, &directions, keys.len())?;
         cleanup_spills(&chunk_paths, &spill_dir);
         merged
     };
-
-    let mut final_perm = permutation;
-    if direction == SortDirection::Desc {
-        final_perm.reverse();
-    }
 
     let _ = fs::remove_dir_all(&spill_dir);
 
@@ -189,11 +204,10 @@ pub fn build_sort(options: SortBuildOptions) -> Result<(), CsvError> {
     }
 
     let mut s = state.lock();
-    s.permutation = Some(final_perm);
+    s.permutation = Some(permutation);
     s.status.is_sorting = false;
     s.status.is_ready = true;
-    s.status.column = Some(column);
-    s.status.direction = Some(direction);
+    s.status.keys = keys;
     s.status.rows_scanned = total_scanned;
     s.status.total_rows = total_scanned;
     s.status.error = None;
@@ -318,23 +332,42 @@ fn encode_key(raw: &str, mode: SortMode) -> Vec<u8> {
 
 #[derive(Clone)]
 struct EncodedKey {
-    key: Vec<u8>,
+    /// One encoded byte string per active sort key, in the same order as
+    /// `SortBuildOptions::keys`.
+    sub_keys: Vec<Vec<u8>>,
     phys: u64,
 }
 
-impl EncodedKey {
-    fn cmp(a: &EncodedKey, b: &EncodedKey) -> Ordering {
-        a.key.cmp(&b.key).then_with(|| a.phys.cmp(&b.phys))
+/// Compare two encoded rows under the current direction list. Each sub-key is
+/// compared bytewise; descending columns flip that comparison. Falls back to
+/// physical row index for stability when all keys tie.
+fn cmp_with_directions(
+    a: &EncodedKey,
+    b: &EncodedKey,
+    directions: &[SortDirection],
+) -> Ordering {
+    for (i, dir) in directions.iter().enumerate() {
+        let ord = a.sub_keys[i].cmp(&b.sub_keys[i]);
+        let ord = match dir {
+            SortDirection::Asc => ord,
+            SortDirection::Desc => ord.reverse(),
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
     }
+    a.phys.cmp(&b.phys)
 }
 
 fn write_chunk(path: &Path, keys: &[EncodedKey]) -> Result<(), CsvError> {
     let f = File::create(path)?;
     let mut w = BufWriter::with_capacity(64 * 1024, f);
     for k in keys {
-        let len = u32::try_from(k.key.len()).unwrap_or(u32::MAX);
-        w.write_all(&len.to_le_bytes())?;
-        w.write_all(&k.key)?;
+        for sub in &k.sub_keys {
+            let len = u32::try_from(sub.len()).unwrap_or(u32::MAX);
+            w.write_all(&len.to_le_bytes())?;
+            w.write_all(sub)?;
+        }
         w.write_all(&k.phys.to_le_bytes())?;
     }
     w.flush()?;
@@ -344,77 +377,100 @@ fn write_chunk(path: &Path, keys: &[EncodedKey]) -> Result<(), CsvError> {
 struct ChunkReader {
     reader: BufReader<File>,
     head: Option<EncodedKey>,
+    num_keys: usize,
 }
 
 impl ChunkReader {
-    fn open(path: &Path) -> Result<Self, CsvError> {
+    fn open(path: &Path, num_keys: usize) -> Result<Self, CsvError> {
         let file = File::open(path)?;
         let reader = BufReader::with_capacity(64 * 1024, file);
-        let mut me = Self { reader, head: None };
+        let mut me = Self {
+            reader,
+            head: None,
+            num_keys,
+        };
         me.advance()?;
         Ok(me)
     }
 
     fn advance(&mut self) -> Result<(), CsvError> {
-        let mut len_buf = [0u8; 4];
-        match self.reader.read_exact(&mut len_buf) {
-            Ok(()) => {}
-            Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
-                self.head = None;
-                return Ok(());
+        let mut sub_keys: Vec<Vec<u8>> = Vec::with_capacity(self.num_keys);
+        for i in 0..self.num_keys {
+            let mut len_buf = [0u8; 4];
+            match self.reader.read_exact(&mut len_buf) {
+                Ok(()) => {}
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
+                    if i == 0 {
+                        self.head = None;
+                        return Ok(());
+                    }
+                    return Err(CsvError::Io(e));
+                }
+                Err(e) => return Err(CsvError::Io(e)),
             }
-            Err(e) => return Err(CsvError::Io(e)),
+            let len = u32::from_le_bytes(len_buf) as usize;
+            let mut key = vec![0u8; len];
+            self.reader.read_exact(&mut key)?;
+            sub_keys.push(key);
         }
-        let len = u32::from_le_bytes(len_buf) as usize;
-        let mut key = vec![0u8; len];
-        self.reader.read_exact(&mut key)?;
         let mut phys_buf = [0u8; 8];
         self.reader.read_exact(&mut phys_buf)?;
         self.head = Some(EncodedKey {
-            key,
+            sub_keys,
             phys: u64::from_le_bytes(phys_buf),
         });
         Ok(())
     }
 }
 
-struct HeapEntry {
+struct HeapEntry<'a> {
     key: EncodedKey,
     source: usize,
+    directions: &'a [SortDirection],
 }
 
-impl Eq for HeapEntry {}
+impl<'a> Eq for HeapEntry<'a> {}
 
-impl PartialEq for HeapEntry {
+impl<'a> PartialEq for HeapEntry<'a> {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
     }
 }
 
-impl Ord for HeapEntry {
+impl<'a> Ord for HeapEntry<'a> {
     fn cmp(&self, other: &Self) -> Ordering {
         // Min-heap: invert the natural order so the smallest key pops first.
         // Tie-break on source index to preserve the chunk-sort's stable order.
-        EncodedKey::cmp(&other.key, &self.key).then_with(|| other.source.cmp(&self.source))
+        cmp_with_directions(&other.key, &self.key, self.directions)
+            .then_with(|| other.source.cmp(&self.source))
     }
 }
 
-impl PartialOrd for HeapEntry {
+impl<'a> PartialOrd for HeapEntry<'a> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-fn merge_chunks(paths: &[PathBuf], total_rows: u64) -> Result<Vec<u64>, CsvError> {
+fn merge_chunks(
+    paths: &[PathBuf],
+    total_rows: u64,
+    directions: &[SortDirection],
+    num_keys: usize,
+) -> Result<Vec<u64>, CsvError> {
     let mut readers: Vec<ChunkReader> = paths
         .iter()
-        .map(|p| ChunkReader::open(p))
+        .map(|p| ChunkReader::open(p, num_keys))
         .collect::<Result<_, _>>()?;
     let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::with_capacity(readers.len());
 
     for (i, reader) in readers.iter_mut().enumerate() {
         if let Some(head) = reader.head.take() {
-            heap.push(HeapEntry { key: head, source: i });
+            heap.push(HeapEntry {
+                key: head,
+                source: i,
+                directions,
+            });
         }
     }
 
@@ -429,6 +485,7 @@ fn merge_chunks(paths: &[PathBuf], total_rows: u64) -> Result<Vec<u64>, CsvError
             heap.push(HeapEntry {
                 key: head,
                 source: entry.source,
+                directions,
             });
         }
     }
@@ -461,8 +518,7 @@ mod tests {
 
     fn run_build(
         path: &Path,
-        column: usize,
-        direction: SortDirection,
+        keys: Vec<SortKey>,
         delimiter: u8,
     ) -> Vec<u64> {
         let state = Arc::new(Mutex::new(SortState::idle()));
@@ -477,8 +533,7 @@ mod tests {
             source_path: path.to_path_buf(),
             data_start: 0,
             delimiter,
-            column,
-            direction,
+            keys,
             spill_dir,
             generation: 1,
             generation_state,
@@ -490,6 +545,10 @@ mod tests {
         perm
     }
 
+    fn single(column: usize, direction: SortDirection) -> Vec<SortKey> {
+        vec![SortKey { column, direction }]
+    }
+
     #[test]
     fn sorts_text_column_ascending() {
         let path = write_fixture(
@@ -497,7 +556,7 @@ mod tests {
             "name,city\nCharlie,Cape Town\nalpha,Durban\nBravo,Pretoria\n",
         );
 
-        let perm = run_build(&path, 0, SortDirection::Asc, b',');
+        let perm = run_build(&path, single(0, SortDirection::Asc), b',');
         // alpha, Bravo, Charlie (case-insensitive)
         assert_eq!(perm, vec![1, 2, 0]);
 
@@ -511,7 +570,7 @@ mod tests {
             "id,score\n1,10\n2,200\n3,30\n4,4000\n",
         );
 
-        let perm = run_build(&path, 1, SortDirection::Desc, b',');
+        let perm = run_build(&path, single(1, SortDirection::Desc), b',');
         // scores descending: 4000, 200, 30, 10 → original phys 3, 1, 2, 0
         assert_eq!(perm, vec![3, 1, 2, 0]);
 
@@ -525,7 +584,7 @@ mod tests {
             "id,name\n1,Charlie\n2,\n3,alpha\n",
         );
 
-        let perm = run_build(&path, 1, SortDirection::Asc, b',');
+        let perm = run_build(&path, single(1, SortDirection::Asc), b',');
         // alpha, Charlie, (empty) → 2, 0, 1
         assert_eq!(perm, vec![2, 0, 1]);
 
@@ -539,7 +598,7 @@ mod tests {
             "id,value\n1,-2.5\n2,1.5\n3,-10\n4,0\n5,1.5\n",
         );
 
-        let perm = run_build(&path, 1, SortDirection::Asc, b',');
+        let perm = run_build(&path, single(1, SortDirection::Asc), b',');
         // values: -10, -2.5, 0, 1.5, 1.5 → phys 2, 0, 3, 1, 4 (stable)
         assert_eq!(perm, vec![2, 0, 3, 1, 4]);
 
@@ -558,15 +617,62 @@ mod tests {
         }
         let path = write_fixture("clear_rows_sort_external.csv", &contents);
 
-        let perm = run_build(&path, 1, SortDirection::Asc, b',');
+        let perm = run_build(&path, single(1, SortDirection::Asc), b',');
         assert_eq!(perm.len() as u64, n);
-        // Sorted ascending by value (== inserted index from n-1 down to 0)
-        // means the sorted permutation should map sorted[i] -> phys row that
-        // originally held value i. Since we wrote values from n-1 down to 0,
-        // value i is at physical index (n - 1 - i). So perm[i] == n-1-i.
         for i in 0..n {
             assert_eq!(perm[i as usize], n - 1 - i);
         }
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn multi_key_sort_primary_then_secondary() {
+        // Primary: department asc; Secondary: salary desc.
+        // Within Eng department, salary desc orders 90, 80, 70 → phys 0, 3, 5
+        // Within HR department, salary desc orders 60, 50      → phys 2, 4
+        // Within Sales department, salary desc orders 100      → phys 1
+        let path = write_fixture(
+            "clear_rows_sort_multi.csv",
+            "dept,salary\nEng,90\nSales,100\nHR,60\nEng,80\nHR,50\nEng,70\n",
+        );
+
+        let perm = run_build(
+            &path,
+            vec![
+                SortKey { column: 0, direction: SortDirection::Asc },
+                SortKey { column: 1, direction: SortDirection::Desc },
+            ],
+            b',',
+        );
+
+        assert_eq!(perm, vec![0, 3, 5, 2, 4, 1]);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn multi_key_sort_mixed_directions_text_text() {
+        // Primary: dept desc; Secondary: name asc.
+        // dept desc: Sales > HR > Eng
+        // Sales: phys 1 (only one)
+        // HR: phys 4 (Bob), phys 2 (Eve) → name asc: Bob, Eve → 4, 2
+        // Eng: phys 3 (Ada), phys 5 (Cy), phys 0 (Zara) → name asc: Ada, Cy, Zara → 3, 5, 0
+        let path = write_fixture(
+            "clear_rows_sort_multi_mixed.csv",
+            "dept,name\nEng,Zara\nSales,Maya\nHR,Eve\nEng,Ada\nHR,Bob\nEng,Cy\n",
+        );
+
+        let perm = run_build(
+            &path,
+            vec![
+                SortKey { column: 0, direction: SortDirection::Desc },
+                SortKey { column: 1, direction: SortDirection::Asc },
+            ],
+            b',',
+        );
+
+        assert_eq!(perm, vec![1, 4, 2, 3, 5, 0]);
 
         let _ = fs::remove_file(path);
     }

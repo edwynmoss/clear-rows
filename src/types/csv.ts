@@ -95,11 +95,15 @@ export type CsvSearchFileError = {
 
 export type SortDirection = "asc" | "desc";
 
+export type SortKey = {
+  column: number;
+  direction: SortDirection;
+};
+
 export type SortStatus = {
   is_sorting: boolean;
   is_ready: boolean;
-  column: number | null;
-  direction: SortDirection | null;
+  keys: SortKey[];
   rows_scanned: number;
   total_rows: number;
   error: string | null;
