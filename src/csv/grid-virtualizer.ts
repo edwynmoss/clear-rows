@@ -26,6 +26,8 @@ export class CsvGridVirtualizer {
   private lastScrollTop = 0;
   private rowPool: HTMLDivElement[] = [];
   private highlightedCell: { rowIndex: number; columnIndex: number } | null = null;
+  /** Column whose sort is currently being computed; rendered with a busy hint. */
+  private pendingSortColumn: number | null = null;
 
   constructor(options: {
     refs: CsvPreviewGridRefs;
@@ -289,6 +291,24 @@ export class CsvGridVirtualizer {
     });
   }
 
+  setPendingSortColumn(columnIndex: number | null): void {
+    this.pendingSortColumn = columnIndex;
+    this.scheduleRefresh();
+  }
+
+  /**
+   * Reset cached row pages and rendered rows after sort state changes. The
+   * row store's keys mix page start with column window, so the same key now
+   * points at different physical rows; we have to drop everything.
+   */
+  resetRowsForSortChange(): void {
+    this.refreshGeneration++;
+    this.rowStore.clear();
+    this.refs.windowRows.replaceChildren();
+    this.rowPool = [];
+    this.scheduleRefresh();
+  }
+
   private syncHorizontalLayout(columnWindow: CsvColumnWindow): void {
     const width = `${columnWindow.totalWidthPx}px`;
     this.refs.inner.style.width = width;
@@ -300,6 +320,10 @@ export class CsvGridVirtualizer {
       this.session.colWidths,
       this.rowHeightPx,
       columnWindow,
+      {
+        activeSort: this.session.activeSort,
+        pendingSortColumn: this.pendingSortColumn,
+      },
     );
   }
 
