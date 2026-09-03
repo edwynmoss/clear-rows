@@ -246,11 +246,17 @@ fn tokenize(input: &str) -> Result<Vec<String>, String> {
                 }
             }
             '"' => {
+                // Quoted group; a doubled quote inside stays part of the group.
                 current.push('"');
                 let mut closed = false;
-                for inner in chars.by_ref() {
+                while let Some(inner) = chars.next() {
                     current.push(inner);
                     if inner == '"' {
+                        if chars.peek() == Some(&'"') {
+                            current.push('"');
+                            chars.next();
+                            continue;
+                        }
                         closed = true;
                         break;
                     }
@@ -304,10 +310,11 @@ fn parse_term(token: &str, headers: &[String]) -> Result<Option<Term>, String> {
     };
 
     let matcher = if op == Some('=') {
-        let literal = unquote(value);
-        if literal.is_empty() {
+        // `column=""` is an explicit "is empty"; a bare `column=` is a typo.
+        if value.is_empty() {
             return Err("Exact match needs a value after '='.".to_owned());
         }
+        let literal = unquote(value);
         Matcher::Exact(literal.trim().to_lowercase())
     } else if let Some(pattern) = regex_body(value) {
         let regex = RegexBuilder::new(pattern)
@@ -340,8 +347,8 @@ fn split_column(body: &str) -> (Option<&str>, Option<char>, &str) {
     let bytes = body.as_bytes();
     if bytes.first() == Some(&b'"') {
         // Quoted column name: find the closing quote, then expect an operator.
-        if let Some(close) = body[1..].find('"') {
-            let after = 1 + close + 1;
+        if let Some(close) = closing_quote(body) {
+            let after = close + 1;
             if let Some(op) = body[after..].chars().next() {
                 if op == ':' || op == '=' {
                     return (Some(&body[..after]), Some(op), &body[after + 1..]);
@@ -366,12 +373,35 @@ fn split_column(body: &str) -> (Option<&str>, Option<char>, &str) {
     (None, None, body)
 }
 
-fn unquote(value: &str) -> &str {
+fn unquote(value: &str) -> std::borrow::Cow<'_, str> {
     if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
-        &value[1..value.len() - 1]
+        let inner = &value[1..value.len() - 1];
+        if inner.contains("\"\"") {
+            std::borrow::Cow::Owned(inner.replace("\"\"", "\""))
+        } else {
+            std::borrow::Cow::Borrowed(inner)
+        }
     } else {
-        value
+        std::borrow::Cow::Borrowed(value)
     }
+}
+
+/// Index of the closing quote of a group starting at byte 0 of `body`,
+/// treating `""` as an escaped quote.
+fn closing_quote(body: &str) -> Option<usize> {
+    let bytes = body.as_bytes();
+    let mut i = 1;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            if bytes.get(i + 1) == Some(&b'"') {
+                i += 2;
+                continue;
+            }
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
 }
 
 fn regex_body(value: &str) -> Option<&str> {
@@ -404,7 +434,7 @@ fn resolve_column(name: &str, headers: &[String]) -> Result<usize, String> {
             .map(|n| n - 1)
             .ok_or_else(|| format!("There is no column #{position}; the file has {} columns.", headers.len()));
     }
-    let wanted = normalize_column_name(name);
+    let wanted = normalize_column_name(&name);
     if wanted.is_empty() {
         return Err("Column name is empty.".to_owned());
     }
@@ -497,6 +527,17 @@ mod tests {
         assert!(err.contains("Unclosed quote"), "{err}");
         let err = parse_query("#9:x", &headers()).unwrap_err();
         assert!(err.contains("no column #9"), "{err}");
+    }
+
+    #[test]
+    fn doubled_quotes_inside_quoted_values_and_columns() {
+        let cells = ["t", "WS-1", "powershell.exe", "say \"hi\" now", "high"];
+        assert!(matches("\"say \"\"hi\"\"\"", &cells));
+        assert!(matches("command_line:\"say \"\"hi\"\"\"", &cells));
+        assert!(!matches("command_line:\"say \"\"bye\"\"\"", &cells));
+        let headers = vec!["odd \"name\"".to_string()];
+        let q = parse_query("\"odd \"\"name\"\"\":x", &headers).expect("quoted column with escaped quote");
+        assert_eq!(q.terms[0].column, Some(0));
     }
 
     #[test]

@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test": "vitest run",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "e2e": "node scripts/e2e/run.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -16,8 +19,10 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.4",
     "@tauri-apps/cli": "^2",
+    "jsdom": "^25.0.1",
     "tailwindcss": "^4.1.4",
     "typescript": "^5.8.3",
-    "vite": "^6.3.5"
+    "vite": "^6.3.5",
+    "vitest": "^2.1.9"
   }
 }

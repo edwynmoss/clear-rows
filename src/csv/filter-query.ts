@@ -46,10 +46,11 @@ export function parseFilterQuery(input: string, headers: string[]): ParsedFilter
     }
 
     if (op === "=") {
-      const literal = unquote(value).trim();
-      if (literal.length === 0) {
+      // `column=""` is an explicit "is empty"; a bare `column=` is a typo.
+      if (value.length === 0) {
         return { terms, error: "Exact match needs a value after '='." };
       }
+      const literal = unquote(value).trim();
       terms.push({ negated, column: resolved, columnInput: column, operator: "exact", value: literal });
       continue;
     }
@@ -102,10 +103,23 @@ function tokenize(input: string): string[] {
       continue;
     }
     if (ch === '"') {
-      const close = input.indexOf('"', i + 1);
-      if (close < 0) throw new Error("Unclosed quote in filter.");
-      current += input.slice(i, close + 1);
-      i = close + 1;
+      // Quoted group; a doubled quote inside stays part of the group.
+      let j = i + 1;
+      let closed = false;
+      while (j < input.length) {
+        if (input[j] === '"') {
+          if (input[j + 1] === '"') {
+            j += 2;
+            continue;
+          }
+          closed = true;
+          break;
+        }
+        j++;
+      }
+      if (!closed) throw new Error("Unclosed quote in filter.");
+      current += input.slice(i, j + 1);
+      i = j + 1;
       continue;
     }
     if (ch === "/" && (current.length === 0 || current.endsWith(":") || current === "-")) {
@@ -138,7 +152,16 @@ function tokenize(input: string): string[] {
 
 function splitColumn(body: string): { column: string | null; op: ":" | "=" | null; value: string } {
   if (body.startsWith('"')) {
-    const close = body.indexOf('"', 1);
+    let close = -1;
+    for (let j = 1; j < body.length; j++) {
+      if (body[j] !== '"') continue;
+      if (body[j + 1] === '"') {
+        j++;
+        continue;
+      }
+      close = j;
+      break;
+    }
     if (close > 0) {
       const op = body[close + 1];
       if (op === ":" || op === "=") {
@@ -162,7 +185,7 @@ function splitColumn(body: string): { column: string | null; op: ":" | "=" | nul
 
 function unquote(value: string): string {
   return value.length >= 2 && value.startsWith('"') && value.endsWith('"')
-    ? value.slice(1, -1)
+    ? value.slice(1, -1).replace(/""/g, '"')
     : value;
 }
 

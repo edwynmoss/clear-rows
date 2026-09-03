@@ -1777,3 +1777,113 @@
 .cr-palette-trigger kbd {
   margin-left: 4px;
 }
+
+/* --------------------------------------------------------------- builder */
+
+.cr-builder {
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-pop);
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  position: fixed;
+  z-index: 45;
+}
+
+.cr-builder[hidden] {
+  display: none;
+}
+
+.cr-builder-suggest {
+  display: grid;
+  gap: 8px;
+}
+
+.cr-builder-suggest[hidden] {
+  display: none;
+}
+
+.cr-builder-suggestion {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 12.5px;
+  padding: 7px 10px;
+  text-align: left;
+}
+
+.cr-builder-suggestion.is-primary {
+  border-color: var(--accent-line);
+}
+
+.cr-builder-suggestion:hover {
+  background: var(--accent-soft);
+}
+
+.cr-builder-scoped {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cr-builder-scoped > span {
+  color: var(--muted);
+  font-size: 12px;
+  margin-right: 2px;
+}
+
+.cr-builder-colchip {
+  background: transparent;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 3px 10px;
+}
+
+.cr-builder-colchip:hover {
+  background: var(--panel-2);
+  border-color: var(--accent-line);
+}
+
+.cr-builder-more {
+  color: var(--dim);
+  font-size: 11.5px;
+}
+
+.cr-builder-row {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(140px, 1fr) minmax(140px, 1fr) minmax(160px, 2fr) auto;
+}
+
+.cr-builder-valuewrap {
+  display: flex;
+  min-width: 0;
+}
+
+.cr-builder-value {
+  background: var(--bg);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  height: 30px;
+  min-width: 0;
+  padding: 0 10px;
+  width: 100%;
+}
+
+.cr-builder-value:disabled {
+  opacity: 0.4;
+}
+
+.cr-builder-hint {
+  color: var(--dim);
+  font-size: 11.5px;
+}

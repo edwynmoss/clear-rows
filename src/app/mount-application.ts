@@ -21,6 +21,7 @@ import { createCommandPalette, type Command } from "../components/command-palett
 import { createCsvEmptyState } from "../components/csv-empty-state";
 import { createCsvPreviewGrid } from "../components/csv-preview-grid";
 import { createErrorCard } from "../components/error-card";
+import { createFilterBuilder } from "../components/filter-builder";
 import { createJumpToRow } from "../components/jump-to-row";
 import { createQueryBar, type QueryMode } from "../components/query-bar";
 import { createReopenAsControl, ENCODING_OPTIONS } from "../components/reopen-as-control";
@@ -194,8 +195,12 @@ export function mountApplication(host: HTMLElement): void {
     initialMode: getStoredSearchMode(),
     initialLimit: getStoredSearchLimit(),
     onSubmit: (mode, query, limit) => {
-      if (mode === "file") void applyFilter(query);
-      else void runSearch(query, limit);
+      if (mode === "file") {
+        filterBuilder.close();
+        void applyFilter(query);
+      } else {
+        void runSearch(query, limit);
+      }
     },
     onClear: (mode) => {
       if (mode === "file") void clearFilter();
@@ -215,7 +220,62 @@ export function mountApplication(host: HTMLElement): void {
       const next = activeFilterTokens.filter((_, i) => i !== index);
       void applyFilter(next.join(" "));
     },
+    onFocusChange: (focused, mode) => {
+      window.clearTimeout(builderBlurTimer);
+      if (focused) {
+        if (mode === "file" && session.path) filterBuilder.open(queryBar.field, queryBar.input.value);
+        return;
+      }
+      // Let a click inside the builder land before deciding to close.
+      builderBlurTimer = window.setTimeout(() => {
+        if (!filterBuilder.contains(document.activeElement)) filterBuilder.close();
+      }, 120);
+    },
+    onInput: (text, mode) => {
+      if (mode === "file") filterBuilder.setTyped(text);
+    },
   });
+
+  const sampleCache = new Map<string, Promise<string[] | null>>();
+  const filterBuilder = createFilterBuilder({
+    headers: () => session.headers,
+    sampleValues: (columnIndex) => {
+      const key = `${session.path ?? ""}#${columnIndex}`;
+      let pending = sampleCache.get(key);
+      if (!pending) {
+        pending = sampleColumnValues(columnIndex);
+        sampleCache.set(key, pending);
+      }
+      return pending;
+    },
+    onAddTerm: (term, replacesTyped) => {
+      void applyFilter(composeWithTerm(term, replacesTyped));
+      queryBar.focus({ caretAtEnd: true });
+      filterBuilder.setTyped(queryBar.input.value);
+    },
+    onSearchAll: (text) => {
+      const needsQuotes = /[\s:"=/]/.test(text) || text.startsWith("-");
+      void applyFilter(composeWithTerm(needsQuotes ? `"${text.replace(/"/g, '""')}"` : text, true));
+      queryBar.focus({ caretAtEnd: true });
+      filterBuilder.setTyped(queryBar.input.value);
+    },
+  });
+  let builderBlurTimer = 0;
+
+  async function sampleColumnValues(columnIndex: number): Promise<string[] | null> {
+    if (!session.path) return null;
+    const distinct = new Set<string>();
+    const rowsToSample = Math.min(session.rowCount, 1024);
+    for (let start = 0; start < rowsToSample; start += 256) {
+      const batch = await csvApi.fetchCsvRows(start, Math.min(256, rowsToSample - start), columnIndex, 1);
+      for (const row of batch.rows) {
+        const value = (row[0] ?? "").trim();
+        if (value.length > 0 && value.length <= 80) distinct.add(value);
+        if (distinct.size > 40) return null;
+      }
+    }
+    return Array.from(distinct).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+  }
 
   const palette = createCommandPalette({ commands: () => buildCommands() });
 
@@ -224,7 +284,7 @@ export function mountApplication(host: HTMLElement): void {
     queryBar: queryBar.root,
     statusBar: statusBar.root,
     toasts: toasts.root,
-    overlays: [palette.root],
+    overlays: [palette.root, filterBuilder.root],
   });
 
   shell.showView(emptyState.root);
@@ -558,6 +618,17 @@ export function mountApplication(host: HTMLElement): void {
 
   function appendTerm(term: string): string {
     return [...activeFilterTokens, term].join(" ");
+  }
+
+  /**
+   * Query text with `term` added to whatever is in the filter box, including
+   * words typed but not yet applied. When the term was built from the word
+   * being typed, that word is replaced instead of kept.
+   */
+  function composeWithTerm(term: string, replacesTyped: boolean): string {
+    let base = queryBar.input.value.trim();
+    if (replacesTyped) base = base.replace(/\S+$/, "").trim();
+    return base.length > 0 ? `${base} ${term}` : term;
   }
 
   async function applyFilter(query: string): Promise<void> {
@@ -1212,6 +1283,8 @@ export function mountApplication(host: HTMLElement): void {
   }
 
   function closeFile(): void {
+    filterBuilder.close();
+    sampleCache.clear();
     openGeneration++;
     indexGeneration++;
     sortGeneration++;
@@ -1372,6 +1445,10 @@ export function mountApplication(host: HTMLElement): void {
       if (virtualizer.getHighlightedCell() === null) return;
       event.preventDefault();
       void copyHighlighted(event.shiftKey ? "row" : "cell");
+      return;
+    }
+    if (event.key === "Escape" && filterBuilder.isOpen()) {
+      filterBuilder.close();
       return;
     }
     if (event.key === "Escape" && !inEditable) {

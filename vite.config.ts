@@ -1,8 +1,13 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
   plugins: [tailwindcss()],
+  test: {
+    include: ["src/**/*.test.ts"],
+    environment: "node",
+  },
   define: {
     // Fallback only; the desktop runtime reads the real version from Tauri.
     __APP_VERSION__: JSON.stringify(process.env.npm_package_version ?? "0.0.0"),

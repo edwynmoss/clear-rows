@@ -14,11 +14,17 @@ export type QueryBarOptions = {
   onLimitChange: (limit: number) => void;
   onPickFiles: () => void;
   onRemoveTerm: (index: number) => void;
+  /** Focus entered/left the text field. */
+  onFocusChange?: (focused: boolean, mode: QueryMode) => void;
+  /** Text changed while typing. */
+  onInput?: (text: string, mode: QueryMode) => void;
 };
 
 export type QueryBar = {
   readonly root: HTMLElement;
   readonly input: HTMLInputElement;
+  /** The bordered field around the input; anchor popovers to this. */
+  readonly field: HTMLDivElement;
   getMode(): QueryMode;
   setMode(mode: QueryMode): void;
   /** Whether a file is open (enables "This file") and whether search files exist. */
@@ -28,7 +34,8 @@ export type QueryBar = {
   setCount(matched: number | null, total: number | null): void;
   setError(message: string | null): void;
   setValue(value: string): void;
-  focus(): void;
+  /** Focus the input; selects everything unless `caretAtEnd` is set. */
+  focus(options?: { caretAtEnd?: boolean }): void;
 };
 
 export function createQueryBar(options: QueryBarOptions): QueryBar {
@@ -158,13 +165,13 @@ export function createQueryBar(options: QueryBarOptions): QueryBar {
       input.placeholder = hasFile
         ? "Filter rows… try  process:powershell  severity=high  -user:svc  /regex/"
         : "Open a file to filter its rows";
-      input.disabled = !hasFile || busy;
+      input.disabled = !hasFile;
     } else {
       input.placeholder =
         searchFileCount > 0
           ? `Search ${formatInt(searchFileCount)} file${searchFileCount === 1 ? "" : "s"}…`
           : "Choose files, then type what to find";
-      input.disabled = searchFileCount === 0 || busy;
+      input.disabled = searchFileCount === 0;
     }
     filesButton.replaceChildren();
     if (searchFileCount > 0) {
@@ -177,6 +184,9 @@ export function createQueryBar(options: QueryBarOptions): QueryBar {
     } else {
       filesButton.textContent = "Files…";
     }
+    // Read-only rather than disabled while busy so the field keeps focus
+    // (a disabled input blurs, which would close the filter builder).
+    input.readOnly = busy;
     clear.hidden = input.value.length === 0;
     cancel.hidden = !busy;
     root.dataset.busy = busy ? "true" : "false";
@@ -187,7 +197,10 @@ export function createQueryBar(options: QueryBarOptions): QueryBar {
     if (!error.hidden) {
       error.hidden = true;
     }
+    options.onInput?.(input.value, mode);
   });
+  input.addEventListener("focus", () => options.onFocusChange?.(true, mode));
+  input.addEventListener("blur", () => options.onFocusChange?.(false, mode));
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
@@ -218,6 +231,7 @@ export function createQueryBar(options: QueryBarOptions): QueryBar {
   return {
     root,
     input,
+    field,
     getMode: () => mode,
     setMode,
     setAvailability(state) {
@@ -272,9 +286,14 @@ export function createQueryBar(options: QueryBarOptions): QueryBar {
         clear.hidden = value.length === 0;
       }
     },
-    focus() {
+    focus(options) {
       input.focus();
-      input.select();
+      if (options?.caretAtEnd) {
+        const end = input.value.length;
+        input.setSelectionRange(end, end);
+      } else {
+        input.select();
+      }
     },
   };
 }
