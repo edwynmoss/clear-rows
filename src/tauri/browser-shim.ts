@@ -22,6 +22,8 @@ import type {
   SortStatus,
 } from "../types/csv";
 
+import { detectHeader, syntheticHeaders, HEADER_SAMPLE_ROWS } from "../csv/header-detect";
+
 type Dataset = {
   path: string;
   headers: string[];
@@ -29,6 +31,8 @@ type Dataset = {
   delimiter: string;
   encoding: string;
   encodingSource: string;
+  hasHeader: boolean;
+  headerSource: string;
   sizeBytes: number;
 };
 
@@ -65,7 +69,7 @@ export async function shimInvoke<T>(command: string, args: Record<string, unknow
       return path as T;
     }
     case "open_csv":
-      return openCsv(String(args.path), args.delimiterOverride as string | null, args.encodingOverride as string | null) as T;
+      return openCsv(String(args.path), args.delimiterOverride as string | null, args.encodingOverride as string | null, args.headerOverride as string | null) as T;
     case "get_csv_rows":
       return getRows(Number(args.start), Number(args.count), Number(args.columnStart), Number(args.columnCount)) as T;
     case "csv_index_status":
@@ -111,13 +115,13 @@ export async function shimInvoke<T>(command: string, args: Record<string, unknow
 
 // ------------------------------------------------------------------ open
 
-function openCsv(path: string, delimiterOverride: string | null, encodingOverride: string | null): OpenSummary {
+function openCsv(path: string, delimiterOverride: string | null, encodingOverride: string | null, headerOverride: string | null = null): OpenSummary {
   let dataset = files.get(path);
   if (!dataset) throw new Error(`Unsupported file: ${path} is not loaded in the browser preview`);
-  if (delimiterOverride || encodingOverride) {
+  if (delimiterOverride || encodingOverride || headerOverride) {
     const raw = rawBytes.get(path);
     if (raw) {
-      dataset = decodeAndParse(path, raw, dataset.sizeBytes, delimiterOverride ?? undefined, encodingOverride ?? undefined);
+      dataset = decodeAndParse(path, raw, dataset.sizeBytes, delimiterOverride ?? undefined, encodingOverride ?? undefined, headerOverride ?? undefined);
       files.set(path, dataset);
     }
   }
@@ -372,6 +376,8 @@ function profileOf(dataset: Dataset): CsvFileProfile {
     sampled_rows: Math.min(256, dataset.rows.length + 1),
     likely_columns: dataset.headers.length,
     binary_like: false,
+    has_header: dataset.hasHeader,
+    header_source: dataset.headerSource,
     warnings: [],
   };
 }
@@ -389,12 +395,14 @@ function delimiterLabel(delimiter: string): string {
 
 const rawBytes = new Map<string, Uint8Array>();
 
-function decodeAndParse(path: string, input: Uint8Array | string, sizeBytes?: number, delimiterOverride?: string, encodingOverride?: string): Dataset {
+function decodeAndParse(path: string, input: Uint8Array | string, sizeBytes?: number, delimiterOverride?: string, encodingOverride?: string, headerOverride?: string): Dataset {
   let text: string;
   let encoding = "utf-8";
   let encodingSource = "utf-8";
   if (typeof input === "string") {
     text = input;
+    // Keep bytes so "reopen as" can re-parse seeded samples too.
+    rawBytes.set(path, new TextEncoder().encode(input));
   } else {
     rawBytes.set(path, input);
     if (encodingOverride) {
@@ -422,13 +430,16 @@ function decodeAndParse(path: string, input: Uint8Array | string, sizeBytes?: nu
   }
   if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
   const delimiter = delimiterOverride ?? detectDelimiter(text);
-  const records = parseDelimited(text, delimiter);
-  const headers = records.shift() ?? [];
+  const records = parseDelimited(text, delimiter).filter((r) => !(r.length === 1 && r[0] === ""));
+  const hasHeader =
+    headerOverride === "header" ? true : headerOverride === "data" ? false : detectHeader(records.slice(0, HEADER_SAMPLE_ROWS));
+  const headerSource = headerOverride === "header" || headerOverride === "data" ? "user" : "detected";
+  const headers = hasHeader
+    ? (records.shift() ?? [])
+    : syntheticHeaders(Math.max(1, ...records.slice(0, HEADER_SAMPLE_ROWS).map((r) => r.length)));
   const width = headers.length;
-  const rows = records
-    .filter((r) => !(r.length === 1 && r[0] === ""))
-    .map((r) => (r.length === width ? r : [...r.slice(0, width), ...Array(Math.max(0, width - r.length)).fill("")]));
-  return { path, headers, rows, delimiter, encoding, encodingSource, sizeBytes: sizeBytes ?? new Blob([text]).size };
+  const rows = records.map((r) => (r.length === width ? r : [...r.slice(0, width), ...Array(Math.max(0, width - r.length)).fill("")]));
+  return { path, headers, rows, delimiter, encoding, encodingSource, hasHeader, headerSource, sizeBytes: sizeBytes ?? new Blob([text]).size };
 }
 
 function detectDelimiter(text: string): string {

@@ -145,9 +145,13 @@ export function mountApplication(host: HTMLElement): void {
   let lastOpenAttempt: string | null = null;
 
   const reopenAsControl = createReopenAsControl({
-    onApply: ({ delimiter, encoding }) => {
+    onApply: ({ delimiter, encoding, header }) => {
       if (!session.path) return;
-      void openPath(session.path, { delimiterOverride: delimiter, encodingOverride: encoding });
+      void openPath(session.path, {
+        delimiterOverride: delimiter,
+        encodingOverride: encoding,
+        headerOverride: header === "auto" ? undefined : header,
+      });
     },
   });
 
@@ -387,6 +391,7 @@ export function mountApplication(host: HTMLElement): void {
     reopenAsControl.setDefaults({
       delimiterChar: typeof profile.delimiter === "number" ? String.fromCharCode(profile.delimiter) : null,
       encoding: profile.encoding,
+      header: profile.has_header ? "header" : "data",
     });
   }
 
@@ -413,7 +418,7 @@ export function mountApplication(host: HTMLElement): void {
     await openPath(selection);
   }
 
-  async function openPath(path: string, overrides: { delimiterOverride?: string; encodingOverride?: string } = {}): Promise<void> {
+  async function openPath(path: string, overrides: csvApi.OpenCsvOptions = {}): Promise<void> {
     if (isOpening) return;
     isOpening = true;
     const generation = ++openGeneration;
@@ -532,6 +537,15 @@ export function mountApplication(host: HTMLElement): void {
     }
     if (warning) {
       toasts.show({ title: warning, tone: "warning", duration: 8000 });
+    }
+    if (!profile.has_header && profile.header_source === "detected") {
+      toasts.show({
+        title: "First row looks like data, so columns are numbered",
+        detail: "If that row is really the column names, change it under the file name.",
+        tone: "neutral",
+        duration: 9000,
+        action: { label: "Change", onClick: () => reopenAsControl.toggle() },
+      });
     }
   }
 

@@ -272,7 +272,8 @@
   display: flex;
   gap: 14px;
   min-width: 0;
-  overflow: hidden;
+  /* Popovers (reopen-as) hang below the bar; children truncate themselves. */
+  overflow: visible;
   padding: 0 14px;
 }
 

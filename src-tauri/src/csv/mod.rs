@@ -4,6 +4,7 @@ mod export;
 mod filter;
 mod parser;
 mod profile;
+pub mod header;
 pub mod scan;
 mod search;
 mod sort;
@@ -79,7 +80,7 @@ mod encoding_integration {
         let path = std::env::temp_dir().join("clear_rows_doc_override.csv");
         // Valid UTF-8 bytes that a user insists are windows-1252: the override must win.
         std::fs::write(&path, b"id,name\n1,plain\n").unwrap();
-        let options = OpenOptions { delimiter_override: None, encoding_override: Some("windows-1252".to_owned()) };
+        let options = OpenOptions { delimiter_override: None, encoding_override: Some("windows-1252".to_owned()), header_override: None };
         let doc = CsvDocument::open_progressive_with_options(&path, 16, options).unwrap();
         assert_eq!(doc.summarize().profile.encoding, "windows-1252");
         assert_eq!(doc.summarize().profile.encoding_source, "user");

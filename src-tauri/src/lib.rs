@@ -79,6 +79,7 @@ async fn open_csv(
     path: String,
     delimiter_override: Option<String>,
     encoding_override: Option<String>,
+    header_override: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<OpenSummary, String> {
     let document_state = Arc::clone(&state.document);
@@ -91,6 +92,7 @@ async fn open_csv(
             .and_then(|value| value.chars().next())
             .and_then(|c| u8::try_from(c as u32).ok()),
         encoding_override,
+        header_override,
     };
 
     let (document, summary) = tauri::async_runtime::spawn_blocking(move || {

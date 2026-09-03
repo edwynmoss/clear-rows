@@ -16,6 +16,7 @@
 //   {"wait": 800}                      sleep milliseconds
 //   {"waitFor": "js", "timeout": 30000} poll until the expression is truthy
 //   {"shot": "name"}                   save <outDir>/<name>.png
+//   {"open": "file.csv"}               open <outDir>/file.csv through the dev hooks
 //
 // Console errors and uncaught exceptions are collected and fail the run.
 
@@ -125,6 +126,22 @@ async function screenshot(name) {
 await send("Page.enable");
 await send("Runtime.enable");
 
+// Every scenario starts on the same file, whatever the previous one left open.
+if (process.env.E2E_FILE) {
+  const file = process.env.E2E_FILE;
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    const state = await evaluate(
+      `(() => { const h = window.__clearRows; if (!h) return "booting"; return h.session.path === ${JSON.stringify(file)} && h.session.rowCount > 0 ? "ready" : "other"; })()`,
+    );
+    if (state === "ready") break;
+    if (state === "other") {
+      await evaluate(`window.__clearRows.openPath(${JSON.stringify(file)}).then(() => "opened")`);
+    }
+    await sleep(500);
+  }
+}
+
 let failures = 0;
 for (const [index, step] of steps.entries()) {
   const label = `step ${index + 1}`;
@@ -177,6 +194,10 @@ for (const [index, step] of steps.entries()) {
     } else if (step.shot !== undefined) {
       await screenshot(step.shot);
       console.log(`${label}: shot ${step.shot}`);
+    } else if (step.open !== undefined) {
+      const target = join(OUT_DIR, step.open);
+      await evaluate(`window.__clearRows.openPath(${JSON.stringify(target)}).then(() => 'opened')`);
+      console.log(`${label}: opened ${step.open}`);
     }
   } catch (err) {
     failures++;

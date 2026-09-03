@@ -1,6 +1,8 @@
 export type ReopenAsValues = {
   delimiter: string;
   encoding: string;
+  /** "auto" | "header" | "data" */
+  header: string;
 };
 
 export type ReopenAsControlOptions = {
@@ -11,7 +13,7 @@ export type ReopenAsControl = {
   /** Popover host; anchor it next to the trigger (the file chip). */
   readonly root: HTMLDivElement;
   setEnabled(enabled: boolean): void;
-  setDefaults(values: { delimiterChar: string | null; encoding: string | null }): void;
+  setDefaults(values: { delimiterChar: string | null; encoding: string | null; header?: string | null }): void;
   open(): void;
   close(): void;
   toggle(): void;
@@ -54,6 +56,12 @@ export const ENCODING_OPTIONS: Array<{ label: string; value: string }> = [
   { label: "EUC-KR (Korean)", value: "euc-kr" },
 ];
 
+export const HEADER_OPTIONS: Array<{ label: string; value: string }> = [
+  { label: "Decide from the file", value: "auto" },
+  { label: "Column names", value: "header" },
+  { label: "Data (number the columns)", value: "data" },
+];
+
 export function createReopenAsControl(options: ReopenAsControlOptions): ReopenAsControl {
   const root = document.createElement("div");
   root.className = "cr-popover cr-reopen";
@@ -81,6 +89,14 @@ export function createReopenAsControl(options: ReopenAsControlOptions): ReopenAs
     encodingField.select.append(opt);
   }
 
+  const headerField = createField("First row", "cr-reopen-header");
+  for (const option of HEADER_OPTIONS) {
+    const opt = document.createElement("option");
+    opt.value = option.value;
+    opt.textContent = option.label;
+    headerField.select.append(opt);
+  }
+
   const actions = document.createElement("div");
   actions.className = "cr-popover-actions";
 
@@ -95,7 +111,7 @@ export function createReopenAsControl(options: ReopenAsControlOptions): ReopenAs
   apply.textContent = "Reopen";
 
   actions.append(cancel, apply);
-  root.append(title, delimiterField.root, encodingField.root, actions);
+  root.append(title, delimiterField.root, encodingField.root, headerField.root, actions);
 
   let enabled = false;
   let isOpen = false;
@@ -114,7 +130,7 @@ export function createReopenAsControl(options: ReopenAsControlOptions): ReopenAs
     root.hidden = false;
     document.addEventListener("mousedown", handleOutsideClick, true);
     document.addEventListener("keydown", handleEscape);
-    encodingField.select.focus();
+    encodingField.select.focus({ preventScroll: true });
   }
 
   function handleOutsideClick(event: MouseEvent): void {
@@ -131,7 +147,7 @@ export function createReopenAsControl(options: ReopenAsControlOptions): ReopenAs
 
   cancel.addEventListener("click", close);
   apply.addEventListener("click", () => {
-    options.onApply({ delimiter: delimiterField.select.value, encoding: encodingField.select.value });
+    options.onApply({ delimiter: delimiterField.select.value, encoding: encodingField.select.value, header: headerField.select.value });
     close();
   });
 
@@ -149,6 +165,10 @@ export function createReopenAsControl(options: ReopenAsControlOptions): ReopenAs
       if (values.encoding) {
         const match = ENCODING_OPTIONS.find((option) => option.value === values.encoding);
         if (match) encodingField.select.value = match.value;
+      }
+      if (values.header) {
+        const match = HEADER_OPTIONS.find((option) => option.value === values.header);
+        if (match) headerField.select.value = match.value;
       }
     },
     open,

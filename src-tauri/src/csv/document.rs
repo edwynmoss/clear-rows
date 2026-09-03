@@ -9,6 +9,7 @@ use encoding_rs_io::DecodeReaderBytesBuilder;
 use serde::Serialize;
 use thiserror::Error;
 
+use super::header::{detect_header, synthetic_headers, HeaderMode, HEADER_SAMPLE_ROWS};
 use super::profile::{delimiter_label, Encoding, EncodingSource, ProfiledCsvFile};
 use super::scan::{BlockIndex, FileMap, RowScanner};
 use super::{profile_csv_path, CsvFileProfile, CsvUtf8Parser};
@@ -17,6 +18,8 @@ use super::{profile_csv_path, CsvFileProfile, CsvUtf8Parser};
 pub struct OpenOptions {
     pub delimiter_override: Option<u8>,
     pub encoding_override: Option<String>,
+    /// "header", "data" or None/"auto" (decide from the first rows).
+    pub header_override: Option<String>,
 }
 
 /// Physical rows between byte-offset checkpoints for random access.
@@ -81,7 +84,7 @@ pub struct CsvDocument {
     path: PathBuf,
     /// Path the parser/indexer/sort actually reads from. For UTF-8 sources this
     /// equals `path`; for UTF-16 sources it points at the transcoded UTF-8
-    /// cache file held alive by `cache_guard`.
+    /// cache file held alive by `cache_guards`.
     read_path: PathBuf,
     /// Byte offset within `read_path` where the CSV data (header row) starts.
     read_data_start: u64,
@@ -110,7 +113,7 @@ pub struct CsvDocument {
     // File handles (Windows refuses removal while handles are open).
     // Held for its Drop side-effect; not read in release builds.
     #[allow(dead_code)]
-    cache_guard: Option<CacheGuard>,
+    cache_guards: Vec<CacheGuard>,
 }
 
 /// Memory-mapped forward-only row walker used to build the block index.
@@ -218,7 +221,28 @@ impl CsvDocument {
             ));
         }
 
-        let (read_path, read_data_start, cache_guard) = prepare_utf8_source(&path, &profiled)?;
+        let (mut read_path, mut read_data_start, cache_guard) = prepare_utf8_source(&path, &profiled)?;
+        let mut cache_guards: Vec<CacheGuard> = cache_guard.into_iter().collect();
+
+        // First row: column names or data? Files without a header get a
+        // working copy with generated names prepended, so every reader keeps
+        // its "row 0 is the header" model.
+        let mode = HeaderMode::from_label(options.header_override.as_deref());
+        let sample = sample_rows(&read_path, read_data_start, profiled.delimiter, HEADER_SAMPLE_ROWS)?;
+        let has_header = match mode {
+            HeaderMode::Present => true,
+            HeaderMode::Absent => false,
+            HeaderMode::Auto => detect_header(&sample),
+        };
+        profiled.profile.has_header = has_header;
+        profiled.profile.header_source = if mode == HeaderMode::Auto { "detected" } else { "user" }.to_owned();
+        if !has_header {
+            let width = sample.iter().map(Vec::len).max().unwrap_or(1).max(1);
+            let (cache, guard) = write_headerless_cache(&read_path, read_data_start, profiled.delimiter, width)?;
+            cache_guards.push(guard);
+            read_path = cache;
+            read_data_start = 0;
+        }
 
         // file_size is the indexer's denominator; for UTF-16 the indexer streams
         // the transcoded cache, so measure it (not the source) to keep progress
@@ -270,7 +294,7 @@ impl CsvDocument {
             parser_row: None,
             map,
             indexer: if is_complete { None } else { Some(indexer) },
-            cache_guard,
+            cache_guards,
         };
 
         document.index_next_chunk(initial_data_rows)?;
@@ -547,7 +571,7 @@ impl CsvDocument {
 
     #[cfg(test)]
     fn cache_path(&self) -> Option<PathBuf> {
-        self.cache_guard.as_ref().map(|g| g.path.clone())
+        self.cache_guards.first().map(|g| g.path.clone())
     }
 
     fn seek_before_physical_row(&mut self, physical_row: u64) -> Result<(), CsvError> {
@@ -618,22 +642,7 @@ fn transcode_to_utf8_cache(source: &Path, encoding: Encoding) -> std::io::Result
 
     sweep_stale_cache_entries(&cache_dir, Duration::from_secs(24 * 60 * 60));
 
-    // Unique-per-call: pid + nanos + source-path hash. Avoids cross-document
-    // races on the same source and removes any need for a `.partial` rename
-    // since no other call competes for this name.
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let mut hasher = DefaultHasher::new();
-    source.hash(&mut hasher);
-    let source_hash = hasher.finish();
-    let cache_path = cache_dir.join(format!(
-        "{}-{:032x}-{:016x}.utf8",
-        std::process::id(),
-        nanos,
-        source_hash
-    ));
+    let cache_path = unique_cache_path(&cache_dir, source, "utf8");
 
     debug_assert!(
         !encoding.is_native_utf8(),
@@ -748,6 +757,66 @@ pub(crate) fn transcode_chunked(
         }
     }
     Ok(())
+}
+
+/// Unique-per-call cache name: pid + nanos + source-path hash. Avoids
+/// cross-document races on the same source and removes any need for a
+/// `.partial` rename since no other call competes for this name.
+fn unique_cache_path(cache_dir: &Path, source: &Path, extension: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    cache_dir.join(format!(
+        "{}-{:032x}-{:016x}.{extension}",
+        std::process::id(),
+        nanos,
+        hasher.finish()
+    ))
+}
+
+/// First `count` rows of a UTF-8 source, for the header vote.
+fn sample_rows(read_path: &Path, data_start: u64, delimiter: u8, count: usize) -> std::io::Result<Vec<Vec<String>>> {
+    let mut file = File::open(read_path)?;
+    file.seek(SeekFrom::Start(data_start))?;
+    let mut parser = CsvUtf8Parser::new(file, delimiter)?;
+    let mut rows = Vec::with_capacity(count);
+    while rows.len() < count {
+        match parser.try_read_row()? {
+            Some(row) => rows.push(row),
+            None => break,
+        }
+    }
+    Ok(rows)
+}
+
+/// Working copy of a headerless file with generated column names on top, so
+/// the first record is read as data everywhere. Lives as long as the guard.
+fn write_headerless_cache(
+    read_path: &Path,
+    data_start: u64,
+    delimiter: u8,
+    width: usize,
+) -> std::io::Result<(PathBuf, CacheGuard)> {
+    let cache_dir = std::env::temp_dir().join("clear-rows").join("utf8-cache");
+    std::fs::create_dir_all(&cache_dir)?;
+    let cache_path = unique_cache_path(&cache_dir, read_path, "hdr");
+    let guard = CacheGuard { path: cache_path.clone() };
+
+    let mut source = File::open(read_path)?;
+    source.seek(SeekFrom::Start(data_start))?;
+    let mut writer = BufWriter::with_capacity(1024 * 1024, File::create(&cache_path)?);
+    let separator = String::from_utf8_lossy(&[delimiter]).into_owned();
+    let header = synthetic_headers(width).join(&separator);
+    writer.write_all(header.as_bytes())?;
+    writer.write_all(b"\n")?;
+    std::io::copy(&mut source, &mut writer)?;
+    writer.flush()?;
+    let file = writer.into_inner().map_err(|e| e.into_error())?;
+    file.sync_all()?;
+    Ok((cache_path, guard))
 }
 
 fn sweep_stale_cache_entries(dir: &Path, max_age: Duration) {
@@ -942,6 +1011,7 @@ mod tests {
             OpenOptions {
                 delimiter_override: Some(b'|'),
                 encoding_override: None,
+                header_override: None,
             },
         )
         .expect("open with delimiter override");
@@ -975,6 +1045,7 @@ mod tests {
             OpenOptions {
                 delimiter_override: None,
                 encoding_override: Some("utf-16-le".to_owned()),
+                header_override: None,
             },
         )
         .expect("open with encoding override");
@@ -1194,5 +1265,62 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn headerless_files_get_generated_column_names() {
+        let path = std::env::temp_dir().join(format!("clear_rows_headerless_{}.csv", std::process::id()));
+        fs::write(
+            &path,
+            "1347445,MALOKANE CONSALIA,FEMALE,PENDING RENEWAL,PENDING RENEWAL\r\r\n\
+             1347446,SOMEONE ELSE,MALE,ACTIVE,ACTIVE\r\r\n\
+             1347447,THIRD PERSON,FEMALE,ACTIVE,ACTIVE\r\r\n",
+        )
+        .unwrap();
+
+        let mut document = CsvDocument::open(&path).expect("open headerless csv");
+        let summary = document.summarize();
+        assert!(!summary.profile.has_header);
+        assert_eq!(summary.profile.header_source, "detected");
+        assert_eq!(summary.headers, ["Column 1", "Column 2", "Column 3", "Column 4", "Column 5"]);
+        assert_eq!(summary.row_count, 3);
+        let rows = document.get_rows(0, 3, 0, 5).unwrap();
+        assert_eq!(rows.rows[0][0], "1347445");
+        assert_eq!(rows.rows[2][1], "THIRD PERSON");
+
+        // The user can insist the first row is a header.
+        let mut forced = CsvDocument::open_progressive_with_options(
+            &path,
+            0,
+            OpenOptions { header_override: Some("header".to_owned()), ..OpenOptions::default() },
+        )
+        .unwrap();
+        forced.index_to_completion().unwrap();
+        let summary = forced.summarize();
+        assert!(summary.profile.has_header);
+        assert_eq!(summary.profile.header_source, "user");
+        assert_eq!(summary.headers[0], "1347445");
+        assert_eq!(summary.row_count, 2);
+        drop(forced);
+        drop(document);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn header_can_be_forced_to_data() {
+        let path = std::env::temp_dir().join(format!("clear_rows_forced_data_{}.csv", std::process::id()));
+        fs::write(&path, "id,name\n1,Ann\n2,Bo\n").unwrap();
+        let mut document = CsvDocument::open_progressive_with_options(
+            &path,
+            0,
+            OpenOptions { header_override: Some("data".to_owned()), ..OpenOptions::default() },
+        )
+        .unwrap();
+        document.index_to_completion().unwrap();
+        let summary = document.summarize();
+        assert_eq!(summary.headers, ["Column 1", "Column 2"]);
+        assert_eq!(summary.row_count, 3);
+        drop(document);
+        let _ = fs::remove_file(path);
     }
 }

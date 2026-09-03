@@ -19,6 +19,8 @@ import type {
 export type OpenCsvOptions = {
   delimiterOverride?: string;
   encodingOverride?: string;
+  /** "header" | "data"; omit for auto-detection. */
+  headerOverride?: string;
 };
 
 /** Desktop: Tauri commands backed by Rust. Browser: the in-memory shim. */
@@ -31,6 +33,7 @@ export async function openCsv(path: string, options: OpenCsvOptions = {}): Promi
     path,
     delimiterOverride: options.delimiterOverride ?? null,
     encodingOverride: options.encodingOverride ?? null,
+    headerOverride: options.headerOverride ?? null,
   });
 }
 

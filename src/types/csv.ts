@@ -23,6 +23,10 @@ export type CsvFileProfile = {
   sampled_rows: number;
   likely_columns: number;
   binary_like: boolean;
+  /** False when the first row is data and columns carry generated names. */
+  has_header: boolean;
+  /** "detected" | "user" — how the header decision was made. */
+  header_source: string;
   warnings: string[];
 };
 

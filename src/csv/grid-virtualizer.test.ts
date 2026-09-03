@@ -29,6 +29,8 @@ function setup(rowCount: number) {
       sampled_rows: 1,
       likely_columns: 2,
       binary_like: false,
+      has_header: true,
+      header_source: "detected",
       warnings: [],
     },
   });

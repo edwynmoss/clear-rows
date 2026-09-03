@@ -93,7 +93,8 @@ function stopApp() {
 
 function ensureSampleFile() {
   const path = join(outDir, "sample-20k.csv");
-  if (existsSync(path)) return path;
+  const headerless = join(outDir, "sample-headerless.csv");
+  if (existsSync(path) && existsSync(headerless)) return path;
   const procs = ["powershell.exe", "cmd.exe", "svchost.exe", "chrome.exe", "rundll32.exe", "mshta.exe", "wscript.exe", "explorer.exe", "teams.exe", "outlook.exe"];
   const severities = ["low", "low", "medium", "high", "critical"];
   const countries = ["ZA", "US", "DE", "NL", "BR"];
@@ -115,5 +116,7 @@ function ensureSampleFile() {
     lines.push([new Date(t).toISOString().slice(0, 19), `WS-${String(Math.floor(rand() * 4000)).padStart(5, "0")}`, `user${Math.floor(rand() * 900)}`, p, cmd, pick(procs), hex(64), pick(severities), pick(countries)].join(","));
   }
   writeFileSync(path, lines.join("\n") + "\n");
+  // Same rows without the header, for the "first row is data" scenario.
+  writeFileSync(headerless, lines.slice(1).join("\n") + "\n");
   return path;
 }

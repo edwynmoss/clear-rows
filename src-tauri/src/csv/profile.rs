@@ -107,6 +107,10 @@ pub struct CsvFileProfile {
     pub sampled_rows: usize,
     pub likely_columns: usize,
     pub binary_like: bool,
+    /// False when the first row is data and columns carry generated names.
+    pub has_header: bool,
+    /// "detected" or "user".
+    pub header_source: String,
     pub warnings: Vec<String>,
 }
 
@@ -181,6 +185,8 @@ pub fn profile_csv_path(path: &Path) -> std::io::Result<ProfiledCsvFile> {
             sampled_rows: detection.sampled_rows,
             likely_columns: detection.likely_columns,
             binary_like,
+            has_header: true,
+            header_source: "detected".to_owned(),
             warnings,
         },
         delimiter: detection.delimiter,
