@@ -87,6 +87,133 @@ mod encoding_integration {
     }
 }
 
+/// Performance harness on a large file. Run in release:
+/// `CLEAR_ROWS_BIG=<csv> cargo test --release perf_timing -- --ignored --nocapture`
+#[cfg(test)]
+mod perf_timing {
+    use super::*;
+    use parking_lot::Mutex;
+    use std::sync::{atomic::AtomicU64, Arc};
+    use std::time::Instant;
+
+    fn ms(started: Instant) -> String {
+        format!("{:>8.0} ms", started.elapsed().as_secs_f64() * 1000.0)
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_timing() {
+        let Ok(path) = std::env::var("CLEAR_ROWS_BIG") else { return };
+        let path = std::path::PathBuf::from(path);
+        let size_mb = path.metadata().map(|m| m.len() as f64 / 1_048_576.0).unwrap_or(0.0);
+        println!("\nfile: {} ({size_mb:.0} MB)", path.display());
+
+        // Open: first rows available, then background indexing to completion.
+        let started = Instant::now();
+        let mut doc = CsvDocument::open_progressive_with_options(&path, 2_048, OpenOptions::default()).unwrap();
+        println!("{:<44}{}   ({} rows visible)", "open (first 2,048 rows)", ms(started), doc.data_row_count());
+        let started = Instant::now();
+        while !doc.index_next_chunk(4_096).unwrap() {}
+        let rows = doc.data_row_count();
+        println!("{:<44}{}   ({} rows)", "index to completion", ms(started), rows);
+
+        // Random access in natural order (what scrolling does).
+        let started = Instant::now();
+        for i in 0..200u64 {
+            let start = (i * 7919 * 13) % rows.max(1);
+            doc.get_rows(start, 64, 0, 9).unwrap();
+        }
+        println!("{:<44}{}   (200 windows of 64 rows)", "random window reads", ms(started));
+
+        let headers = doc.summarize().headers;
+        let read_path = doc.read_path().to_path_buf();
+        let data_start = doc.read_data_start();
+        let delimiter = doc.delimiter();
+
+        // Filters.
+        let mut masks = Vec::new();
+        for query in ["powershell", "process:powershell command_line:-enc", "hostname:/^WS-00[0-4]/ -severity=low", "severity=critical"] {
+            let state = Arc::new(Mutex::new(FilterState::idle()));
+            let started = Instant::now();
+            build_filter(FilterBuildOptions {
+                source_path: read_path.clone(),
+                data_start,
+                delimiter,
+                headers: headers.clone(),
+                query: query.to_owned(),
+                total_rows: rows,
+                generation: 1,
+                generation_state: Arc::new(AtomicU64::new(1)),
+                state: Arc::clone(&state),
+            })
+            .unwrap();
+            let matched = state.lock().mask.as_ref().map(|m| m.len()).unwrap_or(0);
+            println!("{:<44}{}   ({} rows match)", format!("filter  {query}"), ms(started), matched);
+            masks.push(state.lock().mask.clone().unwrap_or_default());
+        }
+
+        // Sort by one text column, then by two.
+        for keys in [vec![SortKey { column: 1, direction: sort::SortDirection::Asc }], vec![SortKey { column: 7, direction: sort::SortDirection::Desc }, SortKey { column: 0, direction: sort::SortDirection::Asc }]] {
+            let state = Arc::new(Mutex::new(SortState::idle()));
+            let spill_dir = std::env::temp_dir().join(format!("clear-rows-perf-sort-{}", std::process::id()));
+            let label = format!("sort by {} key{}", keys.len(), if keys.len() == 1 { "" } else { "s" });
+            let started = Instant::now();
+            build_sort(SortBuildOptions {
+                source_path: read_path.clone(),
+                data_start,
+                delimiter,
+                keys,
+                spill_dir,
+                generation: 1,
+                generation_state: Arc::new(AtomicU64::new(1)),
+                state: Arc::clone(&state),
+            })
+            .unwrap();
+            println!("{:<44}{}", label, ms(started));
+        }
+
+        // Filtered-view scrolling: window reads through a mask (ascending).
+        let mask = masks.last().cloned().unwrap_or_default();
+        let started = Instant::now();
+        for i in 0..200usize {
+            let start = (i * 997) % mask.len().max(1);
+            let slice: Vec<u64> = mask.iter().skip(start).take(64).copied().collect();
+            doc.get_rows_at_physical_data_indices(start as u64, &slice, 0, 9).unwrap();
+        }
+        println!("{:<44}{}   (200 windows through a {}-row mask)", "filtered window reads", ms(started), mask.len());
+
+        // Export the filtered view.
+        let target = std::env::temp_dir().join("clear-rows-perf-export.csv");
+        let export_state = Arc::new(Mutex::new(ExportState::idle()));
+        let started = Instant::now();
+        let written = build_export(ExportBuildOptions {
+            target_path: target.clone(),
+            headers: headers.clone(),
+            delimiter,
+            visible_indices: mask.clone(),
+            generation: 1,
+            generation_state: Arc::new(AtomicU64::new(1)),
+            state: export_state,
+            fetch_chunk: |visible_start: u64, indices: &[u64]| {
+                let mut out = Vec::with_capacity(indices.len());
+                for chunk in indices.chunks(256) {
+                    let batch = doc.get_rows_at_physical_data_indices(visible_start, chunk, 0, 9)?;
+                    out.extend(batch.rows);
+                }
+                Ok(out)
+            },
+        })
+        .unwrap();
+        println!("{:<44}{}   ({} rows written)", "export filtered view", ms(started), written);
+        let _ = std::fs::remove_file(target);
+
+        // Multi-file search of the same file (worst case: whole file scanned).
+        let started = Instant::now();
+        let summary = search_csv_files_with_progress(vec![path.to_string_lossy().into_owned()], "0badf00d".to_owned(), 500, 1, Arc::new(AtomicU64::new(1)), |_| {});
+        println!("{:<44}{}   ({} matches)", "search across files (1 file)", ms(started), summary.matches.len());
+    }
+}
+
 /// Fixture audit: `CLEAR_ROWS_FIXTURES=<dir> cargo test fixture_audit -- --ignored --nocapture`
 /// Prints how every file in the directory profiles, opens and searches. Not a pass/fail test.
 #[cfg(test)]
