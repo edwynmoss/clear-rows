@@ -367,6 +367,7 @@ struct FilterStartParams {
     data_start: u64,
     delimiter: u8,
     total_rows: u64,
+    headers: Vec<String>,
 }
 
 #[tauri::command]
@@ -404,6 +405,7 @@ async fn start_csv_filter(
             data_start: document.read_data_start(),
             delimiter: document.delimiter(),
             total_rows: document.data_row_count(),
+            headers: document.summarize().headers,
         }
     };
 
@@ -427,6 +429,7 @@ async fn start_csv_filter(
         source_path: prepared.source_path,
         data_start: prepared.data_start,
         delimiter: prepared.delimiter,
+        headers: prepared.headers,
         query: trimmed,
         total_rows: prepared.total_rows,
         generation,

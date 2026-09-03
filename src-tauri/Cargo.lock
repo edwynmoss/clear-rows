@@ -331,6 +331,7 @@ dependencies = [
  "encoding_rs",
  "encoding_rs_io",
  "parking_lot",
+ "regex",
  "serde",
  "serde_json",
  "tauri",

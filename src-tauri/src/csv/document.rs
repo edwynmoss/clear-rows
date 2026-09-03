@@ -41,6 +41,9 @@ pub enum CsvError {
 
     #[error("Unsupported file: {0}")]
     UnsupportedFile(String),
+
+    #[error("{0}")]
+    InvalidQuery(String),
 }
 
 #[derive(Clone, Serialize)]

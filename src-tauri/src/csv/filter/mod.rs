@@ -7,8 +7,10 @@ use serde::Serialize;
 
 use super::CsvError;
 
+pub mod query;
 mod scan;
 
+use query::parse_query;
 use scan::scan_filter;
 
 /// How often (in rows) the scanner publishes progress to the shared status.
@@ -48,6 +50,7 @@ pub struct FilterBuildOptions {
     pub source_path: PathBuf,
     pub data_start: u64,
     pub delimiter: u8,
+    pub headers: Vec<String>,
     pub query: String,
     pub total_rows: u64,
     pub generation: u64,
@@ -60,6 +63,7 @@ pub fn build_filter(options: FilterBuildOptions) -> Result<(), CsvError> {
         source_path,
         data_start,
         delimiter,
+        headers,
         query,
         total_rows,
         generation,
@@ -67,8 +71,8 @@ pub fn build_filter(options: FilterBuildOptions) -> Result<(), CsvError> {
         state,
     } = options;
 
-    let needle = query.to_lowercase();
-    if needle.is_empty() {
+    let compiled = parse_query(&query, &headers).map_err(CsvError::InvalidQuery)?;
+    if compiled.is_empty() {
         // An empty filter is equivalent to no filter; clear and exit.
         if is_active(&generation_state, generation) {
             state.lock().clear();
@@ -80,7 +84,7 @@ pub fn build_filter(options: FilterBuildOptions) -> Result<(), CsvError> {
         &source_path,
         data_start,
         delimiter,
-        &needle,
+        &compiled,
         |scanned, matched| {
             if !is_active(&generation_state, generation) {
                 return false;
@@ -127,46 +131,77 @@ mod tests {
         path
     }
 
-    fn run_build(path: &Path, query: &str, delimiter: u8, total_rows: u64) -> Vec<u64> {
+    fn headers_of(contents: &str) -> Vec<String> {
+        contents
+            .lines()
+            .next()
+            .unwrap_or("")
+            .split(',')
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    fn run_build(path: &Path, headers: Vec<String>, query: &str, total_rows: u64) -> Result<Vec<u64>, CsvError> {
         let state = Arc::new(Mutex::new(FilterState::idle()));
         let generation_state = Arc::new(AtomicU64::new(1));
 
         build_filter(FilterBuildOptions {
             source_path: path.to_path_buf(),
             data_start: 0,
-            delimiter,
+            delimiter: b',',
+            headers,
             query: query.to_owned(),
             total_rows,
             generation: 1,
             generation_state,
             state: Arc::clone(&state),
-        })
-        .expect("build filter");
+        })?;
 
         let mask = state.lock().mask.clone().unwrap_or_default();
-        mask
+        Ok(mask)
     }
 
     #[test]
     fn matches_substring_case_insensitively_across_columns() {
-        let path = write_fixture(
-            "clear_rows_filter_basic.csv",
-            "name,city\nAlice,Cape Town\nBob,Durban\nCharlie,CAPE TOWN\nDelta,Pretoria\n",
-        );
+        let contents = "name,city\nAlice,Cape Town\nBob,Durban\nCharlie,CAPE TOWN\nDelta,Pretoria\n";
+        let path = write_fixture("clear_rows_filter_basic.csv", contents);
 
         // "cape" should hit rows 0 and 2 only.
-        let mask = run_build(&path, "cape", b',', 4);
+        let mask = run_build(&path, headers_of(contents), "cape", 4).unwrap();
         assert_eq!(mask, vec![0, 2]);
 
         let _ = fs::remove_file(path);
     }
 
     #[test]
+    fn column_scoped_and_negated_terms() {
+        let contents = "name,city\nAlice,Cape Town\nBob,Durban\nCharlie,CAPE TOWN\nDelta,Pretoria\n";
+        let path = write_fixture("clear_rows_filter_scoped.csv", contents);
+
+        assert_eq!(run_build(&path, headers_of(contents), "city:cape", 4).unwrap(), vec![0, 2]);
+        assert_eq!(run_build(&path, headers_of(contents), "name:cape", 4).unwrap(), Vec::<u64>::new());
+        assert_eq!(run_build(&path, headers_of(contents), "-city:cape", 4).unwrap(), vec![1, 3]);
+        assert_eq!(run_build(&path, headers_of(contents), "city=durban", 4).unwrap(), vec![1]);
+        assert_eq!(run_build(&path, headers_of(contents), "name:/^[a-c]/", 4).unwrap(), vec![0, 1, 2]);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn unknown_column_is_an_error() {
+        let contents = "name,city\nAlice,Cape Town\n";
+        let path = write_fixture("clear_rows_filter_badcol.csv", contents);
+
+        let err = run_build(&path, headers_of(contents), "nope:x", 1).unwrap_err();
+        assert!(matches!(err, CsvError::InvalidQuery(_)));
+        assert!(err.to_string().contains("Unknown column"), "{err}");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn empty_query_clears_filter() {
-        let path = write_fixture(
-            "clear_rows_filter_empty.csv",
-            "name\nA\nB\nC\n",
-        );
+        let path = write_fixture("clear_rows_filter_empty.csv", "name\nA\nB\nC\n");
 
         let state = Arc::new(Mutex::new(FilterState::idle()));
         let generation_state = Arc::new(AtomicU64::new(1));
@@ -177,6 +212,7 @@ mod tests {
             source_path: path.to_path_buf(),
             data_start: 0,
             delimiter: b',',
+            headers: vec!["name".to_owned()],
             query: String::new(),
             total_rows: 3,
             generation: 1,
@@ -192,12 +228,10 @@ mod tests {
 
     #[test]
     fn no_matches_yields_empty_mask() {
-        let path = write_fixture(
-            "clear_rows_filter_nomatch.csv",
-            "name\nAlice\nBob\nCharlie\n",
-        );
+        let contents = "name\nAlice\nBob\nCharlie\n";
+        let path = write_fixture("clear_rows_filter_nomatch.csv", contents);
 
-        let mask = run_build(&path, "zzz", b',', 3);
+        let mask = run_build(&path, headers_of(contents), "zzz", 3).unwrap();
         assert!(mask.is_empty());
 
         let _ = fs::remove_file(path);
@@ -205,12 +239,10 @@ mod tests {
 
     #[test]
     fn mask_is_returned_in_ascending_physical_order() {
-        let path = write_fixture(
-            "clear_rows_filter_order.csv",
-            "id,tag\n1,red\n2,green\n3,RED\n4,blue\n5,Red\n",
-        );
+        let contents = "id,tag\n1,red\n2,green\n3,RED\n4,blue\n5,Red\n";
+        let path = write_fixture("clear_rows_filter_order.csv", contents);
 
-        let mask = run_build(&path, "red", b',', 5);
+        let mask = run_build(&path, headers_of(contents), "red", 5).unwrap();
         assert_eq!(mask, vec![0, 2, 4]);
 
         let _ = fs::remove_file(path);
