@@ -31,7 +31,21 @@ export type TopBar = {
 };
 
 function logoSvg(): string {
-  return `<svg viewBox="0 0 1301 1579" aria-hidden="true"><path d="M1230 70H590L70 500" stroke="currentColor" stroke-width="140" stroke-linecap="round" fill="none"/><path d="M1230 1509H590L70 1079" stroke="currentColor" stroke-width="140" stroke-linecap="round" fill="none"/><path d="M40 470L905 785L40 1100" class="cr-logo-accent" stroke-width="150" fill="none"/></svg>`;
+  // The Clear Rows mark (public/clear-rows-logo.png, src-tauri/icons): three
+  // rows split by a notch, with the middle cell picked out in brand gold.
+  // Geometry traced from the 1024px artwork; bars follow the text colour so
+  // the mark reads in both themes, the gold stays fixed.
+  return `<svg viewBox="180 312 665 400" aria-hidden="true">
+  <g fill="currentColor">
+    <path d="M180 312h290l33 72H180z"/>
+    <path d="M555 312h290v72H522z"/>
+    <path d="M180 476h208l-30 72H180z"/>
+    <path d="M628 476h217v72H598z"/>
+    <path d="M180 640h290l33 72H180z"/>
+    <path d="M555 640h290v72H522z"/>
+  </g>
+  <path class="cr-logo-accent" d="M412 476h192l-31 72H382z"/>
+</svg>`;
 }
 
 export function createTopBar(options: TopBarOptions): TopBar {

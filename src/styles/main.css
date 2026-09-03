@@ -14,6 +14,7 @@
   --muted: #5f6873;
   --dim: #98a1ab;
   --accent: #2f6fe4;
+  --brand-gold: #d4b84a;
   --accent-soft: rgba(47, 111, 228, 0.1);
   --accent-line: rgba(47, 111, 228, 0.35);
   --accent-fg: #ffffff;
@@ -286,8 +287,8 @@
 .cr-logo {
   color: var(--text);
   display: inline-flex;
-  height: 24px;
-  width: 20px;
+  height: 15px;
+  width: 25px;
 }
 
 .cr-logo svg {
@@ -296,7 +297,7 @@
 }
 
 .cr-logo-accent {
-  stroke: var(--accent);
+  fill: var(--brand-gold);
 }
 
 .cr-wordmark {
