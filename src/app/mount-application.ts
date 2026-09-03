@@ -1,6 +1,3 @@
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { getVersion } from "@tauri-apps/api/app";
 
 import { CSV_ROW_HEIGHT_PX } from "./constants";
 import { directoryOf, fileNameOf, formatBytes, formatEncoding, formatInt, formatRate, pluralize } from "./format";
@@ -37,6 +34,7 @@ import { CsvSession, type ActiveSort } from "../csv/csv-session";
 import { parseFilterQuery, splitFilterTokens, type FilterTerm } from "../csv/filter-query";
 import { CsvGridVirtualizer, type HighlightedCell } from "../csv/grid-virtualizer";
 import { isDesktopRuntime } from "../tauri/runtime";
+import { appVersion, pickFile, pickFiles, pickSavePath, wireFileDrop } from "../tauri/platform";
 import type {
   CsvFileProfileResult,
   CsvSearchMatch,
@@ -57,6 +55,7 @@ const GUTTER_WIDTH_PX = 52;
 
 export function mountApplication(host: HTMLElement): void {
   const desktop = isDesktopRuntime();
+  void desktop;
   const session = new CsvSession();
 
   // ---------------------------------------------------------------- state
@@ -75,7 +74,7 @@ export function mountApplication(host: HTMLElement): void {
   let activeFilterTokens: string[] = [];
   let pendingFilter: string | null = null;
   let fileSizeBytes = 0;
-  let appVersion = __APP_VERSION__;
+  let appVersionLabel = __APP_VERSION__;
   let columnMenuEl: HTMLDivElement | null = null;
 
   // ----------------------------------------------------------- components
@@ -235,22 +234,29 @@ export function mountApplication(host: HTMLElement): void {
   errorCard.root.hidden = true;
 
   emptyState.setRecent(getRecentFiles());
-  statusBar.setMeta({ version: `v${appVersion}` });
+  statusBar.setMeta({ version: `v${appVersionLabel}` });
   statusBar.setMessage("Ready", "neutral");
   syncAvailability();
   virtualizer.bind();
   host.replaceChildren(shell.root);
 
-  if (desktop) {
-    void getVersion()
-      .then((version) => {
-        appVersion = version;
-        statusBar.setMeta({ version: `v${version}` });
-      })
-      .catch(() => undefined);
-    void openStartupFile();
-    wireFileDrop();
-  }
+  void appVersion().then((version) => {
+    if (!version) return;
+    appVersionLabel = version;
+    statusBar.setMeta({ version: `v${version}` });
+  });
+  void openStartupFile();
+  wireFileDrop({
+    onOver: () => {
+      emptyState.setDragOver(true);
+      gridArea.dataset.dragOver = "true";
+    },
+    onLeave: () => {
+      emptyState.setDragOver(false);
+      delete gridArea.dataset.dragOver;
+    },
+    onDrop: (path) => void openPath(path),
+  });
 
   // ------------------------------------------------------------ views
   function showFileView(): void {
@@ -335,22 +341,15 @@ export function mountApplication(host: HTMLElement): void {
 
   // ------------------------------------------------------------- open
   async function runOpenDialog(): Promise<void> {
-    if (!desktop) {
-      toasts.show({ title: "Opening files needs the desktop app", tone: "warning" });
-      return;
-    }
     if (isOpening) return;
-    let selection: string | string[] | null;
+    let selection: string | null;
     try {
-      selection = await openDialog({
-        multiple: false,
-        filters: [{ name: "Delimited text", extensions: ["csv", "tsv", "txt", "tab", "dat", "log"] }],
-      });
+      selection = await pickFile();
     } catch (err) {
       toasts.show({ title: "Could not open the file dialog", detail: formatError(err), tone: "negative" });
       return;
     }
-    if (!selection || Array.isArray(selection)) return;
+    if (!selection) return;
     await openPath(selection);
   }
 
@@ -550,22 +549,6 @@ export function mountApplication(host: HTMLElement): void {
     } catch (err) {
       toasts.show({ title: "Startup file could not be opened", detail: formatError(err), tone: "negative" });
     }
-  }
-
-  function wireFileDrop(): void {
-    void getCurrentWebview().onDragDropEvent((event) => {
-      const payload = event.payload;
-      if (payload.type === "over" || payload.type === "enter") {
-        emptyState.setDragOver(true);
-        gridArea.dataset.dragOver = "true";
-        return;
-      }
-      emptyState.setDragOver(false);
-      delete gridArea.dataset.dragOver;
-      if (payload.type !== "drop") return;
-      const path = payload.paths.find((candidate) => candidate.length > 0);
-      if (path) void openPath(path);
-    });
   }
 
   // ------------------------------------------------------------ filter
@@ -823,7 +806,7 @@ export function mountApplication(host: HTMLElement): void {
     let target: string | null = presetTarget ?? null;
     if (!target) {
       try {
-        target = await saveDialog({ defaultPath: defaultName, filters: [{ name: "CSV", extensions: ["csv"] }] });
+        target = await pickSavePath(defaultName);
       } catch (err) {
         toasts.show({ title: "Could not open the save dialog", detail: formatError(err), tone: "negative" });
         return;
@@ -913,19 +896,14 @@ export function mountApplication(host: HTMLElement): void {
 
   // ------------------------------------------------------------ search
   async function pickSearchFiles(): Promise<void> {
-    if (!desktop) return;
-    let selection: string | string[] | null;
+    let paths: string[] | null;
     try {
-      selection = await openDialog({
-        multiple: true,
-        filters: [{ name: "Delimited text", extensions: ["csv", "tsv", "txt", "tab", "dat", "log"] }],
-      });
+      paths = await pickFiles();
     } catch (err) {
       toasts.show({ title: "Could not open the file dialog", detail: formatError(err), tone: "negative" });
       return;
     }
-    if (!selection) return;
-    const paths = Array.isArray(selection) ? selection : [selection];
+    if (!paths || paths.length === 0) return;
     await applySearchFiles(paths, true);
   }
 
