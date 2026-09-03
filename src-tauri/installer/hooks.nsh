@@ -18,7 +18,7 @@
 ; --- Welcome ----------------------------------------------------------
 !define MUI_WELCOMEPAGE_TITLE "Clear Rows"
 !define MUI_WELCOMEPAGE_TITLE_3LINES
-!define MUI_WELCOMEPAGE_TEXT "Open multi-gigabyte CSV and TSV files in a second, filter them with plain words or a click, sort, search across files and export what you found.$\r$\n$\r$\nSetup installs for your account only, so no administrator prompt.$\r$\n$\r$\nClick Next to choose where it goes, or Install to accept the defaults."
+!define MUI_WELCOMEPAGE_TEXT "Open multi-gigabyte CSV and TSV files in a second, filter them with plain words or a click, sort, search across files and export what you found.$\r$\n$\r$\nSetup installs for your account only, so no administrator prompt.$\r$\n$\r$\nClick Next to choose where it goes."
 
 ; --- Finish -----------------------------------------------------------
 !define MUI_FINISHPAGE_TITLE "Ready"
