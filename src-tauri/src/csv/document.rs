@@ -640,19 +640,38 @@ fn transcode_to_utf8_cache(source: &Path, encoding: Encoding) -> std::io::Result
         "transcode_to_utf8_cache called for a native UTF-8 source"
     );
     let charset = encoding.charset();
-    // UTF-16 sources may carry a BOM we want stripped; legacy codepages never do,
-    // and sniffing there could misfire on a file that happens to start with 0xFF 0xFE.
-    let sniff_bom = matches!(encoding, Encoding::Utf16Le | Encoding::Utf16Be);
+    let cache_file = File::create(&cache_path)?;
 
+    if chunked_transcode_is_safe(charset) {
+        // UTF-16 and single-byte codepages carry no decoder state across a
+        // well-chosen boundary, so the file is decoded in parallel chunks.
+        let map = FileMap::open(source)?;
+        let bytes = map.bytes();
+        // Only UTF-16 sources may carry a BOM we want stripped; legacy codepages
+        // never do, and sniffing there could misfire on a file that happens to
+        // start with 0xFF 0xFE.
+        let bom = match encoding {
+            Encoding::Utf16Le if bytes.starts_with(&[0xFF, 0xFE]) => 2,
+            Encoding::Utf16Be if bytes.starts_with(&[0xFE, 0xFF]) => 2,
+            _ => 0,
+        };
+        let mut writer = BufWriter::with_capacity(1024 * 1024, cache_file);
+        transcode_chunked(&bytes[bom..], charset, TRANSCODE_CHUNK_BYTES, &mut writer)?;
+        writer.flush()?;
+        let cache_file = writer.into_inner().map_err(|e| e.into_error())?;
+        cache_file.sync_all()?;
+        return Ok(cache_path);
+    }
+
+    // Multi-byte legacy codepages (Shift_JIS, GBK, Big5, EUC-KR, ...) keep
+    // state between bytes, so they stream through one decoder.
     let source_file = File::open(source)?;
     let mut decoded = DecodeReaderBytesBuilder::new()
         .encoding(Some(charset))
-        .bom_sniffing(sniff_bom)
-        .strip_bom(sniff_bom)
+        .bom_sniffing(false)
         .build(source_file);
     // 256 KiB BufWriter cuts io::copy's syscall count ~32x vs the default
-    // 8 KiB internal buffer; meaningful on large UTF-16 first-opens.
-    let cache_file = File::create(&cache_path)?;
+    // 8 KiB internal buffer.
     let mut writer = BufWriter::with_capacity(256 * 1024, cache_file);
     std::io::copy(&mut decoded, &mut writer)?;
     writer.flush()?;
@@ -661,6 +680,74 @@ fn transcode_to_utf8_cache(source: &Path, encoding: Encoding) -> std::io::Result
     drop(cache_file);
 
     Ok(cache_path)
+}
+
+/// Source bytes decoded per parallel task. Large enough that per-chunk
+/// overhead is noise, small enough that a 16-chunk batch stays around
+/// 128 MB of source in flight.
+const TRANSCODE_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+
+/// Chunks decoded before their output is written, bounding memory.
+const TRANSCODE_BATCH_CHUNKS: usize = 16;
+
+fn chunked_transcode_is_safe(charset: &'static encoding_rs::Encoding) -> bool {
+    charset == encoding_rs::UTF_16LE || charset == encoding_rs::UTF_16BE || charset.is_single_byte()
+}
+
+/// Decode `body` (BOM already removed) to UTF-8 in parallel chunks, writing
+/// the pieces to `out` in order. Chunk boundaries are chosen so no decoder
+/// state crosses them: even offsets that do not split a UTF-16 surrogate
+/// pair, or anywhere for single-byte codepages. Invalid sequences become
+/// U+FFFD exactly as the streaming decoder would produce.
+pub(crate) fn transcode_chunked(
+    body: &[u8],
+    charset: &'static encoding_rs::Encoding,
+    chunk_bytes: usize,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
+    use rayon::prelude::*;
+
+    let utf16 = charset == encoding_rs::UTF_16LE || charset == encoding_rs::UTF_16BE;
+    let little_endian = charset == encoding_rs::UTF_16LE;
+    let chunk_bytes = chunk_bytes.max(4);
+
+    let mut bounds = vec![0usize];
+    let mut position = 0usize;
+    while position < body.len() {
+        let mut next = position.saturating_add(chunk_bytes).min(body.len());
+        if utf16 && next < body.len() {
+            next -= next % 2;
+            // A high surrogate right before the cut belongs with the low
+            // surrogate after it; move the cut in front of the pair.
+            if next >= 2 {
+                let unit = if little_endian {
+                    u16::from_le_bytes([body[next - 2], body[next - 1]])
+                } else {
+                    u16::from_be_bytes([body[next - 2], body[next - 1]])
+                };
+                if (0xD800..0xDC00).contains(&unit) {
+                    next -= 2;
+                }
+            }
+        }
+        if next <= position {
+            next = body.len();
+        }
+        bounds.push(next);
+        position = next;
+    }
+
+    let ranges: Vec<(usize, usize)> = bounds.windows(2).map(|w| (w[0], w[1])).collect();
+    for batch in ranges.chunks(TRANSCODE_BATCH_CHUNKS) {
+        let pieces: Vec<std::borrow::Cow<'_, str>> = batch
+            .par_iter()
+            .map(|&(start, end)| charset.decode_without_bom_handling(&body[start..end]).0)
+            .collect();
+        for piece in pieces {
+            out.write_all(piece.as_bytes())?;
+        }
+    }
+    Ok(())
 }
 
 fn sweep_stale_cache_entries(dir: &Path, max_age: Duration) {
@@ -1057,5 +1144,55 @@ mod tests {
         assert_eq!(tail.start, tail_start);
         assert!(!tail.rows.is_empty());
         assert!(tail.rows.iter().all(|row| row.len() == 5));
+    }
+
+    /// Chunked decoding must match the streaming decoder byte for byte, in
+    /// particular when a chunk cut lands inside a surrogate pair, on an odd
+    /// byte, or on a multibyte character in a single-byte codepage.
+    #[test]
+    fn chunked_transcode_matches_streaming_decoder() {
+        use encoding_rs::{UTF_16BE, UTF_16LE, WINDOWS_1252};
+
+        let text: String = (0..2_000)
+            .map(|i| match i % 5 {
+                0 => "a,b,c\n".to_owned(),
+                1 => "emoji,\u{1F600}\u{1F601},x\n".to_owned(),
+                2 => "caf\u{e9},na\u{ef}ve,\u{2014}\n".to_owned(),
+                3 => "\u{10FFFF}\u{10000},pair,end\n".to_owned(),
+                _ => format!("row{i},\"q,\"\"q\"\",{i}\n"),
+            })
+            .collect();
+
+        let mut utf16le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        let mut utf16be: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_be_bytes()).collect();
+        // Trailing odd byte: both decoders should emit U+FFFD for it.
+        utf16le.push(0x41);
+        utf16be.push(0x41);
+        let (cp1252, _, _) = WINDOWS_1252.encode(&text);
+        let mut cp1252 = cp1252.into_owned();
+        cp1252.extend_from_slice(&[0x81, 0x8D, 0xFF]); // undefined + high bytes
+
+        for (label, bytes, charset) in [
+            ("utf-16le", utf16le, UTF_16LE),
+            ("utf-16be", utf16be, UTF_16BE),
+            ("windows-1252", cp1252, WINDOWS_1252),
+        ] {
+            let mut streamed = Vec::new();
+            let mut decoder = DecodeReaderBytesBuilder::new()
+                .encoding(Some(charset))
+                .bom_sniffing(false)
+                .build(std::io::Cursor::new(&bytes));
+            decoder.read_to_end(&mut streamed).unwrap();
+
+            // Cuts of 7 and 10 bytes hit every boundary case many times.
+            for chunk in [7usize, 10, 64, 1 << 20] {
+                let mut chunked = Vec::new();
+                transcode_chunked(&bytes, charset, chunk, &mut chunked).unwrap();
+                assert!(
+                    chunked == streamed,
+                    "{label} with {chunk}-byte chunks diverged from the streaming decoder"
+                );
+            }
+        }
     }
 }
