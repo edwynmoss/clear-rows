@@ -1889,3 +1889,108 @@
   color: var(--dim);
   font-size: 11.5px;
 }
+
+/* ------------------------------------------------------------- empty hero */
+
+.cr-hero {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 0 auto 26px;
+}
+
+.cr-hero-mark {
+  color: var(--text);
+  height: 48px;
+  width: 80px;
+}
+
+.cr-hero-mark svg {
+  height: 100%;
+  overflow: visible;
+  width: 100%;
+}
+
+.cr-hero-word {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.1px;
+}
+
+/* First paint: rows slide in from their side, the cell lands last, the
+   wordmark fades up. Timed so the whole thing settles in about a second. */
+.cr-hero[data-intro="true"] .cr-mark-l,
+.cr-hero[data-intro="true"] .cr-mark-r,
+.cr-hero[data-intro="true"] .cr-mark-cell {
+  animation: cr-row-in 520ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.cr-hero[data-intro="true"] .cr-mark-l { --cr-from: -60px; }
+.cr-hero[data-intro="true"] .cr-mark-r { --cr-from: 60px; }
+.cr-hero[data-intro="true"] .cr-mark-r1 { animation-delay: 40ms; }
+.cr-hero[data-intro="true"] .cr-mark-r2 { animation-delay: 160ms; }
+.cr-hero[data-intro="true"] .cr-mark-r3 { animation-delay: 280ms; }
+
+.cr-hero[data-intro="true"] .cr-mark-cell {
+  --cr-from: 0px;
+  animation-name: cr-cell-in;
+  animation-delay: 520ms;
+  animation-duration: 420ms;
+}
+
+.cr-hero[data-intro="true"] .cr-hero-word {
+  animation: cr-fade-up 480ms ease-out 620ms both;
+}
+
+@keyframes cr-row-in {
+  from {
+    opacity: 0;
+    transform: translateX(var(--cr-from));
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes cr-cell-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.6);
+    transform-origin: 50% 50%;
+    transform-box: fill-box;
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.08);
+    transform-origin: 50% 50%;
+    transform-box: fill-box;
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+    transform-origin: 50% 50%;
+    transform-box: fill-box;
+  }
+}
+
+@keyframes cr-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cr-hero[data-intro="true"] .cr-mark-l,
+  .cr-hero[data-intro="true"] .cr-mark-r,
+  .cr-hero[data-intro="true"] .cr-mark-cell,
+  .cr-hero[data-intro="true"] .cr-hero-word {
+    animation: none;
+  }
+}

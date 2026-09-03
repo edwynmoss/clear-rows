@@ -28,7 +28,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "nsis"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -55,7 +57,20 @@
         "role": "Viewer",
         "mimeType": "text/tab-separated-values"
       }
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "installer/header.bmp",
+        "sidebarImage": "installer/sidebar.bmp",
+        "installerHooks": "installer/hooks.nsh",
+        "installMode": "currentUser",
+        "compression": "lzma",
+        "startMenuFolder": "Clear Rows"
+      }
+    },
+    "shortDescription": "Open large CSV files instantly",
+    "longDescription": "Clear Rows opens multi-gigabyte CSV and TSV files in a second, with filtering, sorting, cross-file search and export."
   },
   "plugins": {}
 }

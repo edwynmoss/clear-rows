@@ -1,4 +1,5 @@
 import { formatBytes, formatEncoding, formatInt } from "../app/format";
+import { markSvg } from "./brand-mark";
 
 export type FileChipInfo = {
   name: string;
@@ -30,23 +31,6 @@ export type TopBar = {
   setExportBusy(busy: boolean): void;
 };
 
-function logoSvg(): string {
-  // The Clear Rows mark (public/clear-rows-logo.png, src-tauri/icons): three
-  // rows split by a notch, with the middle cell picked out in brand gold.
-  // Geometry traced from the 1024px artwork; bars follow the text colour so
-  // the mark reads in both themes, the gold stays fixed.
-  return `<svg viewBox="180 312 665 400" aria-hidden="true">
-  <g fill="currentColor">
-    <path d="M180 312h290l33 72H180z"/>
-    <path d="M555 312h290v72H522z"/>
-    <path d="M180 476h208l-30 72H180z"/>
-    <path d="M628 476h217v72H598z"/>
-    <path d="M180 640h290l33 72H180z"/>
-    <path d="M555 640h290v72H522z"/>
-  </g>
-  <path class="cr-logo-accent" d="M412 476h192l-31 72H382z"/>
-</svg>`;
-}
 
 export function createTopBar(options: TopBarOptions): TopBar {
   const root = document.createElement("header");
@@ -56,7 +40,7 @@ export function createTopBar(options: TopBarOptions): TopBar {
   brand.className = "cr-brand";
   const mark = document.createElement("span");
   mark.className = "cr-logo";
-  mark.innerHTML = logoSvg();
+  mark.innerHTML = markSvg();
   const word = document.createElement("span");
   word.className = "cr-wordmark";
   word.textContent = "Clear Rows";

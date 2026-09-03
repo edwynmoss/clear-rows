@@ -1,5 +1,6 @@
 import { fileNameOf, formatBytes, formatInt, relativeTime } from "../app/format";
 import type { RecentFile } from "../app/preferences";
+import { markSvg } from "./brand-mark";
 
 export type CsvEmptyStateOptions = {
   onOpenClick: () => void;
@@ -19,6 +20,35 @@ export function createCsvEmptyState(options: CsvEmptyStateOptions): CsvEmptyStat
 
   const inner = document.createElement("div");
   inner.className = "cr-empty-inner";
+
+  // The mark assembles row by row the first time the empty state shows;
+  // afterwards it just sits there. Reduced-motion users get the still.
+  const hero = document.createElement("div");
+  hero.className = "cr-hero";
+  const heroMark = document.createElement("div");
+  heroMark.className = "cr-hero-mark";
+  heroMark.innerHTML = markSvg();
+  const heroWord = document.createElement("div");
+  heroWord.className = "cr-hero-word";
+  heroWord.textContent = "Clear Rows";
+  hero.append(heroMark, heroWord);
+  hero.dataset.intro = "true";
+  // The intro is over once the hero has been on screen long enough for the
+  // last piece (the wordmark, ~1.1 s) to land. If a file opens before that,
+  // the flag stays and the intro plays the next time the empty state shows.
+  if (typeof IntersectionObserver === "function") {
+    let timer = 0;
+    const observer = new IntersectionObserver((entries) => {
+      const visible = entries.some((entry) => entry.isIntersecting);
+      window.clearTimeout(timer);
+      if (!visible) return;
+      timer = window.setTimeout(() => {
+        delete hero.dataset.intro;
+        observer.disconnect();
+      }, 1300);
+    });
+    observer.observe(hero);
+  }
 
   const drop = document.createElement("div");
   drop.className = "cr-drop";
@@ -48,7 +78,7 @@ export function createCsvEmptyState(options: CsvEmptyStateOptions): CsvEmptyStat
   recentList.className = "cr-recent-list";
   recent.append(recentTitle, recentList);
 
-  inner.append(drop, recent);
+  inner.append(hero, drop, recent);
   root.append(inner);
 
   return {
