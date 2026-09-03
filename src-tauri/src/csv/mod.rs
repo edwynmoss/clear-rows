@@ -136,7 +136,7 @@ mod perf_timing {
         for query in ["powershell", "process:powershell command_line:-enc", "hostname:/^WS-00[0-4]/ -severity=low", "severity=critical"] {
             let state = Arc::new(Mutex::new(FilterState::idle()));
             let started = Instant::now();
-            build_filter(FilterBuildOptions {
+            let built = build_filter(FilterBuildOptions {
                 source_path: read_path.clone(),
                 data_start,
                 delimiter,
@@ -147,15 +147,20 @@ mod perf_timing {
                 generation: 1,
                 generation_state: Arc::new(AtomicU64::new(1)),
                 state: Arc::clone(&state),
-            })
-            .unwrap();
+            });
+            if let Err(err) = built {
+                // Real-world files rarely have the synthetic column names.
+                println!("{:<44}skipped ({err})", format!("filter  {query}"));
+                continue;
+            }
             let matched = state.lock().mask.as_ref().map(|m| m.len()).unwrap_or(0);
             println!("{:<44}{}   ({} rows match)", format!("filter  {query}"), ms(started), matched);
             masks.push(state.lock().mask.as_ref().map(|m| (**m).clone()).unwrap_or_default());
         }
 
         // Sort by one text column, then by two.
-        for keys in [vec![SortKey { column: 1, direction: sort::SortDirection::Asc }], vec![SortKey { column: 7, direction: sort::SortDirection::Desc }, SortKey { column: 0, direction: sort::SortDirection::Asc }]] {
+        let last = headers.len().saturating_sub(1);
+        for keys in [vec![SortKey { column: 1.min(last), direction: sort::SortDirection::Asc }], vec![SortKey { column: 7.min(last), direction: sort::SortDirection::Desc }, SortKey { column: 0, direction: sort::SortDirection::Asc }]] {
             let state = Arc::new(Mutex::new(SortState::idle()));
             let spill_dir = std::env::temp_dir().join(format!("clear-rows-perf-sort-{}", std::process::id()));
             let label = format!("sort by {} key{}", keys.len(), if keys.len() == 1 { "" } else { "s" });
