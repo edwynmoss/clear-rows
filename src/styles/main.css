@@ -302,6 +302,7 @@
   font-size: 13.5px;
   font-weight: 600;
   letter-spacing: -0.1px;
+  white-space: nowrap;
 }
 
 .cr-filechip-wrap {
@@ -331,6 +332,7 @@
   color: var(--text);
   font-weight: 500;
   max-width: 260px;
+  min-width: 6ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -339,7 +341,16 @@
 .cr-filechip-meta {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .cr-filechip-meta,
+  .cr-filechip-enc small {
+    display: none;
+  }
 }
 
 .cr-filechip-enc {
