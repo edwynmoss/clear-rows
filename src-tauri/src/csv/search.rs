@@ -9,6 +9,7 @@ use std::sync::{
 use serde::Serialize;
 use thiserror::Error;
 
+use super::document::prepare_utf8_source;
 use super::{profile_csv_path, CsvUtf8Parser};
 
 const DEFAULT_MAX_MATCHES: usize = 500;
@@ -262,8 +263,11 @@ fn search_one_file(
         ));
     }
 
-    let mut file = File::open(&path)?;
-    file.seek(SeekFrom::Start(profiled.data_start))?;
+    // Same UTF-8 view the document opener uses, so UTF-16 and legacy-codepage
+    // files are searchable instead of being scanned as raw bytes.
+    let (read_path, read_data_start, _cache_guard) = prepare_utf8_source(&path, &profiled)?;
+    let mut file = File::open(&read_path)?;
+    file.seek(SeekFrom::Start(read_data_start))?;
     let delimiter = profiled.delimiter;
     let mut parser = CsvUtf8Parser::new(file, delimiter)?;
     let headers = match parser.try_read_row()? {

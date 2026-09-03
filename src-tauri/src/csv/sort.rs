@@ -523,10 +523,16 @@ mod tests {
     ) -> Vec<u64> {
         let state = Arc::new(Mutex::new(SortState::idle()));
         let generation_state = Arc::new(AtomicU64::new(1));
+        // Unique per call: tests run in parallel in one process, so pid alone
+        // let two tests share (and delete) the same spill directory.
         let spill_dir = std::env::temp_dir().join(format!(
-            "clear-rows-sort-test-{}-{}",
+            "clear-rows-sort-test-{}-{}-{}",
             std::process::id(),
-            generation_state.load(AtomicOrdering::SeqCst)
+            generation_state.load(AtomicOrdering::SeqCst),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
         ));
 
         build_sort(SortBuildOptions {

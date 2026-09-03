@@ -5,12 +5,11 @@ use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use encoding_rs::{UTF_16BE, UTF_16LE};
 use encoding_rs_io::DecodeReaderBytesBuilder;
 use serde::Serialize;
 use thiserror::Error;
 
-use super::profile::{delimiter_label, Encoding, ProfiledCsvFile};
+use super::profile::{delimiter_label, Encoding, EncodingSource, ProfiledCsvFile};
 use super::{profile_csv_path, CsvFileProfile, CsvUtf8Parser};
 
 #[derive(Default)]
@@ -102,7 +101,7 @@ pub struct CsvDocument {
     cache_guard: Option<CacheGuard>,
 }
 
-struct CacheGuard {
+pub(crate) struct CacheGuard {
     path: PathBuf,
 }
 
@@ -110,6 +109,24 @@ impl Drop for CacheGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// Resolve where the UTF-8 bytes for a profiled file live. Native UTF-8 files
+/// are read in place (skipping any BOM); everything else is transcoded once
+/// into a temp cache file that lives as long as the returned guard. Shared by
+/// the document opener and the multi-file search so both see the same text.
+pub(crate) fn prepare_utf8_source(
+    path: &Path,
+    profiled: &ProfiledCsvFile,
+) -> std::io::Result<(PathBuf, u64, Option<CacheGuard>)> {
+    if profiled.encoding.is_native_utf8() {
+        return Ok((path.to_path_buf(), profiled.data_start, None));
+    }
+    let cache = transcode_to_utf8_cache(path, profiled.encoding)?;
+    let guard = CacheGuard {
+        path: cache.clone(),
+    };
+    Ok((cache, 0, Some(guard)))
 }
 
 impl CsvDocument {
@@ -151,16 +168,7 @@ impl CsvDocument {
             ));
         }
 
-        let (read_path, read_data_start, cache_guard) = match profiled.encoding {
-            Encoding::Utf16Le | Encoding::Utf16Be => {
-                let cache = transcode_to_utf8_cache(&path, profiled.encoding)?;
-                let guard = CacheGuard {
-                    path: cache.clone(),
-                };
-                (cache, 0u64, Some(guard))
-            }
-            Encoding::Utf8 | Encoding::Utf8Bom => (path.clone(), profiled.data_start, None),
-        };
+        let (read_path, read_data_start, cache_guard) = prepare_utf8_source(&path, &profiled)?;
 
         // file_size is the indexer's denominator; for UTF-16 the indexer streams
         // the transcoded cache, so measure it (not the source) to keep progress
@@ -510,16 +518,20 @@ fn transcode_to_utf8_cache(source: &Path, encoding: Encoding) -> std::io::Result
         source_hash
     ));
 
-    let charset = match encoding {
-        Encoding::Utf16Le => UTF_16LE,
-        Encoding::Utf16Be => UTF_16BE,
-        _ => unreachable!("transcode_to_utf8_cache called with non-UTF-16 encoding"),
-    };
+    debug_assert!(
+        !encoding.is_native_utf8(),
+        "transcode_to_utf8_cache called for a native UTF-8 source"
+    );
+    let charset = encoding.charset();
+    // UTF-16 sources may carry a BOM we want stripped; legacy codepages never do,
+    // and sniffing there could misfire on a file that happens to start with 0xFF 0xFE.
+    let sniff_bom = matches!(encoding, Encoding::Utf16Le | Encoding::Utf16Be);
 
     let source_file = File::open(source)?;
     let mut decoded = DecodeReaderBytesBuilder::new()
         .encoding(Some(charset))
-        .bom_sniffing(true)
+        .bom_sniffing(sniff_bom)
+        .strip_bom(sniff_bom)
         .build(source_file);
     // 256 KiB BufWriter cuts io::copy's syscall count ~32x vs the default
     // 8 KiB internal buffer; meaningful on large UTF-16 first-opens.
@@ -575,20 +587,18 @@ fn apply_encoding_override(
     choice: &str,
     path: &Path,
 ) -> std::io::Result<()> {
-    let normalized = choice.to_ascii_lowercase();
-    let (encoding, label) = match normalized.as_str() {
-        "utf-8" => (Encoding::Utf8, "utf-8"),
-        "utf-8-bom" => (Encoding::Utf8Bom, "utf-8-bom"),
-        "utf-16-le" => (Encoding::Utf16Le, "utf-16-le"),
-        "utf-16-be" => (Encoding::Utf16Be, "utf-16-be"),
-        // Unknown choice: leave detection in place rather than corrupting state.
-        _ => return Ok(()),
+    // Accepts our fixed labels plus any WHATWG encoding label (windows-1252,
+    // shift_jis, koi8-r, ...). Unknown choice: leave detection in place rather
+    // than corrupting state.
+    let Some(encoding) = Encoding::from_label(choice) else {
+        return Ok(());
     };
 
     let data_start = data_start_for_override(path, encoding)?;
     profiled.encoding = encoding;
     profiled.data_start = data_start;
-    profiled.profile.encoding = label.to_owned();
+    profiled.profile.encoding = encoding.label();
+    profiled.profile.encoding_source = EncodingSource::User.as_str().to_owned();
     // User asserted the encoding; trust them over the binary-looking heuristic
     // (e.g. BOM-less UTF-16 reads as binary to the byte-level sniffer).
     profiled.profile.binary_like = false;
@@ -605,14 +615,14 @@ fn data_start_for_override(path: &Path, encoding: Encoding) -> std::io::Result<u
     let n = file.read(&mut prefix)?;
 
     let matches_bom = match encoding {
-        Encoding::Utf8 => false,
+        Encoding::Utf8 | Encoding::Legacy(_) => false,
         Encoding::Utf8Bom => n >= 3 && prefix == [0xEF, 0xBB, 0xBF],
         Encoding::Utf16Le => n >= 2 && prefix[0] == 0xFF && prefix[1] == 0xFE,
         Encoding::Utf16Be => n >= 2 && prefix[0] == 0xFE && prefix[1] == 0xFF,
     };
 
     Ok(match encoding {
-        Encoding::Utf8 => 0,
+        Encoding::Utf8 | Encoding::Legacy(_) => 0,
         Encoding::Utf8Bom => {
             if matches_bom {
                 3

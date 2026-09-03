@@ -23,11 +23,32 @@ const DELIMITER_OPTIONS: Array<{ label: string; char: string }> = [
   { label: "Space ( )", char: " " },
 ];
 
+// Values are labels the Rust side resolves: our four fixed ones, then WHATWG
+// encoding labels understood by encoding_rs.
 const ENCODING_OPTIONS: Array<{ label: string; value: string }> = [
   { label: "UTF-8", value: "utf-8" },
-  { label: "UTF-8 BOM", value: "utf-8-bom" },
+  { label: "UTF-8 with BOM", value: "utf-8-bom" },
   { label: "UTF-16 LE", value: "utf-16-le" },
   { label: "UTF-16 BE", value: "utf-16-be" },
+  { label: "Windows-1252 (Western, Excel default)", value: "windows-1252" },
+  { label: "ISO-8859-1 (Latin-1)", value: "iso-8859-1" },
+  { label: "ISO-8859-15 (Latin-9)", value: "iso-8859-15" },
+  { label: "Windows-1250 (Central European)", value: "windows-1250" },
+  { label: "Windows-1251 (Cyrillic)", value: "windows-1251" },
+  { label: "KOI8-R (Cyrillic)", value: "koi8-r" },
+  { label: "Windows-1253 (Greek)", value: "windows-1253" },
+  { label: "Windows-1254 (Turkish)", value: "windows-1254" },
+  { label: "Windows-1255 (Hebrew)", value: "windows-1255" },
+  { label: "Windows-1256 (Arabic)", value: "windows-1256" },
+  { label: "Windows-1257 (Baltic)", value: "windows-1257" },
+  { label: "Windows-1258 (Vietnamese)", value: "windows-1258" },
+  { label: "Mac Roman", value: "macintosh" },
+  { label: "Shift_JIS (Japanese)", value: "shift_jis" },
+  { label: "EUC-JP (Japanese)", value: "euc-jp" },
+  { label: "GBK (Simplified Chinese)", value: "gbk" },
+  { label: "GB18030 (Simplified Chinese)", value: "gb18030" },
+  { label: "Big5 (Traditional Chinese)", value: "big5" },
+  { label: "EUC-KR (Korean)", value: "euc-kr" },
 ];
 
 export function createReopenAsControl(options: ReopenAsControlOptions): ReopenAsControl {
