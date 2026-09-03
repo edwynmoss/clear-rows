@@ -95,6 +95,10 @@ pub struct CsvDocument {
     is_complete: bool,
     index_error: Option<String>,
     parser: CsvUtf8Parser<File>,
+    /// Physical row number the random-access parser is positioned before,
+    /// when known. Lets ascending reads (filtered views, exports) skip
+    /// forward instead of re-seeking to a block checkpoint every row.
+    parser_row: Option<u64>,
     indexer: Option<CsvUtf8Parser<File>>,
     // Must be the last field: declaration order is drop order, so the cache
     // file is removed only after `parser` and `indexer` have released their
@@ -221,6 +225,7 @@ impl CsvDocument {
             is_complete,
             index_error: None,
             parser,
+            parser_row: None,
             indexer: if is_complete { None } else { Some(indexer) },
             cache_guard,
         };
@@ -370,7 +375,10 @@ impl CsvDocument {
         for _ in 0..take {
             let row = match self.parser.try_read_row()? {
                 Some(r) => r,
-                None => return Err(CsvError::MissingRow),
+                None => {
+                    self.parser_row = None;
+                    return Err(CsvError::MissingRow);
+                }
             };
 
             rows.push(preview_sliced_row(
@@ -379,6 +387,7 @@ impl CsvDocument {
                 visible_column_count,
             ));
         }
+        self.parser_row = Some(physical_first + take as u64);
 
         Ok(RowBatch {
             start,
@@ -431,8 +440,12 @@ impl CsvDocument {
 
             let row = match self.parser.try_read_row()? {
                 Some(r) => r,
-                None => return Err(CsvError::MissingRow),
+                None => {
+                    self.parser_row = None;
+                    return Err(CsvError::MissingRow);
+                }
             };
+            self.parser_row = Some(physical_row + 1);
 
             rows.push(preview_sliced_row(
                 row,
@@ -455,19 +468,36 @@ impl CsvDocument {
 
     fn seek_before_physical_row(&mut self, physical_row: u64) -> Result<(), CsvError> {
         let block = (physical_row / self.block_size) as usize;
-        let seek = *self.block_starts.get(block).ok_or(CsvError::MissingRow)?;
+        let skip_from_block = physical_row - (physical_row / self.block_size) * self.block_size;
 
-        let skip = physical_row - (physical_row / self.block_size) * self.block_size;
+        // Fast path: the parser already sits at or before the target and is
+        // closer than the block checkpoint would be. Skip forward from here.
+        let mut skip = skip_from_block;
+        let mut needs_seek = true;
+        if let Some(current) = self.parser_row {
+            if current <= physical_row && physical_row - current <= skip_from_block {
+                skip = physical_row - current;
+                needs_seek = false;
+            }
+        }
 
-        self.parser.seek(seek)?;
+        if needs_seek {
+            let seek = *self.block_starts.get(block).ok_or(CsvError::MissingRow)?;
+            self.parser.seek(seek)?;
+            self.parser_row = None;
+        }
 
         for _ in 0..skip {
             match self.parser.try_skip_row()? {
                 Some(()) => {}
-                None => return Err(CsvError::MissingRow),
+                None => {
+                    self.parser_row = None;
+                    return Err(CsvError::MissingRow);
+                }
             }
         }
 
+        self.parser_row = Some(physical_row);
         Ok(())
     }
 }
