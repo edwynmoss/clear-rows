@@ -36,6 +36,42 @@ pub struct AppState {
     filter_state: Arc<Mutex<FilterState>>,
     export_generation: Arc<AtomicU64>,
     export_state: Arc<Mutex<ExportState>>,
+    /// Cached composition of the active filter mask over the active sort
+    /// permutation (visible order -> physical data index). Keyed by pointer
+    /// identity of the two inputs, so it is rebuilt only when either changes.
+    composed_view: Arc<Mutex<Option<ComposedView>>>,
+}
+
+struct ComposedView {
+    mask: Arc<Vec<u64>>,
+    perm: Arc<Vec<u64>>,
+    visible: Arc<Vec<u64>>,
+}
+
+/// Visible-order physical indices for a filter mask applied over a sort
+/// permutation, computed once and shared until either input changes.
+fn composed_visible(
+    cache: &Mutex<Option<ComposedView>>,
+    mask: &Arc<Vec<u64>>,
+    perm: &Arc<Vec<u64>>,
+) -> Arc<Vec<u64>> {
+    if let Some(entry) = cache.lock().as_ref() {
+        if Arc::ptr_eq(&entry.mask, mask) && Arc::ptr_eq(&entry.perm, perm) {
+            return Arc::clone(&entry.visible);
+        }
+    }
+    let visible: Vec<u64> = perm
+        .iter()
+        .copied()
+        .filter(|phys| mask.binary_search(phys).is_ok())
+        .collect();
+    let visible = Arc::new(visible);
+    *cache.lock() = Some(ComposedView {
+        mask: Arc::clone(mask),
+        perm: Arc::clone(perm),
+        visible: Arc::clone(&visible),
+    });
+    visible
 }
 
 #[tauri::command]
@@ -93,15 +129,23 @@ async fn get_csv_rows(
     let document_state = Arc::clone(&state.document);
     let sort_state = Arc::clone(&state.sort_state);
     let filter_state = Arc::clone(&state.filter_state);
+    let composed_cache = Arc::clone(&state.composed_view);
 
     tauri::async_runtime::spawn_blocking(move || {
-        // Snapshot filter mask and sort permutation up front so we don't
-        // hold either lock while reading the document.
-        let filter_mask: Option<Vec<u64>> = filter_state.lock().mask.clone();
-        let sort_perm: Option<Vec<u64>> = sort_state.lock().permutation.clone();
+        // Snapshot filter mask and sort permutation up front (Arc clones, no
+        // copying) so we don't hold either lock while reading the document.
+        let filter_mask: Option<Arc<Vec<u64>>> = filter_state.lock().mask.clone();
+        let sort_perm: Option<Arc<Vec<u64>>> = sort_state.lock().permutation.clone();
 
-        let physical_slice: Option<Vec<u64>> =
-            compose_visible_slice(filter_mask, sort_perm, start, count);
+        let physical_slice: Option<Vec<u64>> = match (filter_mask, sort_perm) {
+            (None, None) => None,
+            (None, Some(perm)) => Some(slice_into(&perm, start, count)),
+            (Some(mask), None) => Some(slice_into(&mask, start, count)),
+            (Some(mask), Some(perm)) => {
+                let visible = composed_visible(&composed_cache, &mask, &perm);
+                Some(slice_into(&visible, start, count))
+            }
+        };
 
         let mut guard = document_state.lock();
         let document = guard
@@ -121,23 +165,6 @@ async fn get_csv_rows(
     .map_err(|err| err.to_string())?
 }
 
-/// Resolve the requested page of *visible* rows to a slice of physical row
-/// indices, given the active filter and sort. Returns `None` when no filter
-/// or sort is active (caller falls back to physical-row reads).
-fn compose_visible_slice(
-    filter_mask: Option<Vec<u64>>,
-    sort_perm: Option<Vec<u64>>,
-    start: u64,
-    count: usize,
-) -> Option<Vec<u64>> {
-    match (filter_mask, sort_perm) {
-        (None, None) => None,
-        (None, Some(perm)) => Some(slice_into(&perm, start, count)),
-        (Some(mask), None) => Some(slice_into(&mask, start, count)),
-        (Some(mask), Some(perm)) => Some(compose_filter_over_sort(&mask, &perm, start, count)),
-    }
-}
-
 fn slice_into(source: &[u64], start: u64, count: usize) -> Vec<u64> {
     let start_usize = usize::try_from(start).unwrap_or(usize::MAX);
     if start_usize >= source.len() {
@@ -145,28 +172,6 @@ fn slice_into(source: &[u64], start: u64, count: usize) -> Vec<u64> {
     }
     let end = start_usize.saturating_add(count).min(source.len());
     source[start_usize..end].to_vec()
-}
-
-/// Walk `sort_perm` in sorted order, keeping only entries whose physical
-/// index is in `mask`, and return the `[start..start+count)` window. `mask`
-/// must be sorted ascending (it always is — the filter scanner appends rows
-/// in physical order).
-fn compose_filter_over_sort(mask: &[u64], sort_perm: &[u64], start: u64, count: usize) -> Vec<u64> {
-    let mut out = Vec::with_capacity(count);
-    let mut visible_idx: u64 = 0;
-    for &phys in sort_perm.iter() {
-        if mask.binary_search(&phys).is_err() {
-            continue;
-        }
-        if visible_idx >= start {
-            out.push(phys);
-            if out.len() == count {
-                break;
-            }
-        }
-        visible_idx += 1;
-    }
-    out
 }
 
 #[tauri::command]
@@ -543,18 +548,15 @@ async fn start_csv_export(
 
         // Snapshot filter mask + sort permutation under the same view we'll
         // export. If either changes mid-export the generation bump cancels us.
-        let filter_mask: Option<Vec<u64>> = filter_state.lock().mask.clone();
-        let sort_perm: Option<Vec<u64>> = sort_state.lock().permutation.clone();
+        let filter_mask: Option<Arc<Vec<u64>>> = filter_state.lock().mask.clone();
+        let sort_perm: Option<Arc<Vec<u64>>> = sort_state.lock().permutation.clone();
         let total_rows = document.data_row_count();
 
         let visible_indices = match (filter_mask, sort_perm) {
             (None, None) => (0..total_rows).collect::<Vec<u64>>(),
-            (None, Some(perm)) => perm,
-            (Some(mask), None) => mask,
-            (Some(mask), Some(perm)) => perm
-                .into_iter()
-                .filter(|phys| mask.binary_search(phys).is_ok())
-                .collect(),
+            (None, Some(perm)) => (*perm).clone(),
+            (Some(mask), None) => (*mask).clone(),
+            (Some(mask), Some(perm)) => (*composed_visible(&state.composed_view, &mask, &perm)).clone(),
         };
 
         ExportStartParams {
@@ -719,6 +721,7 @@ pub fn run() {
             filter_state: Arc::new(Mutex::new(FilterState::idle())),
             export_generation: Arc::new(AtomicU64::new(0)),
             export_state: Arc::new(Mutex::new(ExportState::idle())),
+            composed_view: Arc::new(Mutex::new(None)),
         })
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![

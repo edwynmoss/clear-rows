@@ -151,7 +151,7 @@ mod perf_timing {
             .unwrap();
             let matched = state.lock().mask.as_ref().map(|m| m.len()).unwrap_or(0);
             println!("{:<44}{}   ({} rows match)", format!("filter  {query}"), ms(started), matched);
-            masks.push(state.lock().mask.clone().unwrap_or_default());
+            masks.push(state.lock().mask.as_ref().map(|m| (**m).clone()).unwrap_or_default());
         }
 
         // Sort by one text column, then by two.

@@ -68,7 +68,7 @@ pub struct SortState {
     pub status: SortStatus,
     /// `permutation[sorted_index] == physical_data_index` (0-based, header
     /// excluded). `None` when no sort is active.
-    pub permutation: Option<Vec<u64>>,
+    pub permutation: Option<Arc<Vec<u64>>>,
 }
 
 impl SortState {
@@ -218,7 +218,7 @@ pub fn build_sort(options: SortBuildOptions) -> Result<(), CsvError> {
     }
 
     let mut s = state.lock();
-    s.permutation = Some(permutation);
+    s.permutation = Some(Arc::new(permutation));
     s.status.is_sorting = false;
     s.status.is_ready = true;
     s.status.keys = keys;
@@ -562,7 +562,7 @@ mod tests {
         })
         .expect("build sort");
 
-        let perm = state.lock().permutation.clone().expect("permutation");
+        let perm = state.lock().permutation.as_ref().map(|p| (**p).clone()).expect("permutation");
         perm
     }
 

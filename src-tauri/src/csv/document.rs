@@ -100,6 +100,10 @@ pub struct CsvDocument {
     /// when known. Lets ascending reads (filtered views, exports) skip
     /// forward instead of re-seeking to a block checkpoint every row.
     parser_row: Option<u64>,
+    /// Read-only map of `read_path` for random-access reads (sorted and
+    /// filtered views), which are far cheaper over a map than through the
+    /// buffered parser's seek-and-skip.
+    map: FileMap,
     indexer: Option<FastIndexer>,
     // Must be the last field: declaration order is drop order, so the cache
     // file is removed only after `parser` and `indexer` have released their
@@ -246,6 +250,7 @@ impl CsvDocument {
         let mut access_file = File::open(&read_path)?;
         access_file.seek(SeekFrom::Start(read_data_start))?;
         let parser = CsvUtf8Parser::new(access_file, delimiter)?;
+        let map = FileMap::open(&read_path)?;
 
         let mut document = Self {
             path,
@@ -263,6 +268,7 @@ impl CsvDocument {
             index_error: None,
             parser,
             parser_row: None,
+            map,
             indexer: if is_complete { None } else { Some(indexer) },
             cache_guard,
         };
@@ -473,6 +479,14 @@ impl CsvDocument {
 
         let max_data = self.data_row_count();
         let mut rows = Vec::with_capacity(physical_indices.len());
+        let bytes = self.map.bytes();
+        let end = (self.indexed_bytes as usize).min(bytes.len());
+        let mut fields = Vec::with_capacity(32);
+        let mut scratch = Vec::new();
+        // Consecutive requests often hit the same block (filtered views are
+        // ascending); remember where the scanner is so we can skip forward
+        // instead of restarting from the checkpoint every time.
+        let mut cursor: Option<(u64, RowScanner)> = None;
 
         for &phys in physical_indices {
             if phys >= max_data {
@@ -485,16 +499,37 @@ impl CsvDocument {
             }
 
             let physical_row = phys.saturating_add(1);
-            self.seek_before_physical_row(physical_row)?;
-
-            let row = match self.parser.try_read_row()? {
-                Some(r) => r,
-                None => {
-                    self.parser_row = None;
-                    return Err(CsvError::MissingRow);
+            let block = (physical_row / self.block_size) as usize;
+            let block_row = block as u64 * self.block_size;
+            let mut scanner = match cursor.take() {
+                Some((at, scanner)) if at <= physical_row && physical_row - at <= physical_row - block_row => {
+                    cursor = Some((at, scanner));
+                    let (at, scanner) = cursor.take().unwrap();
+                    let mut scanner = scanner;
+                    for _ in at..physical_row {
+                        if !scanner.skip_row() {
+                            return Err(CsvError::MissingRow);
+                        }
+                    }
+                    scanner
+                }
+                _ => {
+                    let start = *self.block_starts.get(block).ok_or(CsvError::MissingRow)? as usize;
+                    let mut scanner = RowScanner::new(&bytes[..end], start.min(end), self.delimiter);
+                    for _ in block_row..physical_row {
+                        if !scanner.skip_row() {
+                            return Err(CsvError::MissingRow);
+                        }
+                    }
+                    scanner
                 }
             };
-            self.parser_row = Some(physical_row + 1);
+
+            if !scanner.next_row(&mut fields) {
+                return Err(CsvError::MissingRow);
+            }
+            let row: Vec<String> = fields.iter().map(|f| super::scan::field_string(bytes, f, &mut scratch)).collect();
+            cursor = Some((physical_row + 1, scanner));
 
             rows.push(preview_sliced_row(
                 row,

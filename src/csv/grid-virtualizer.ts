@@ -255,6 +255,7 @@ export class CsvGridVirtualizer {
       }
 
       windowRows.replaceChildren(fragment);
+      delete this.refs.root.dataset.stale;
       this.prefetchAdjacentRows(scrollDirection, first, lastExclusive, rawCount, availableRowCount, columnWindow);
     } catch (err) {
       if (generation === this.refreshGeneration) console.error(err);
@@ -362,8 +363,9 @@ export class CsvGridVirtualizer {
   resetRowsForVisibilityChange(): void {
     this.refreshGeneration++;
     this.rowStore.clear();
-    this.refs.windowRows.replaceChildren();
-    this.rowPool = [];
+    // Keep the current rows on screen, dimmed, until the new page arrives.
+    // Clearing here produced a blank grid for the length of the fetch.
+    this.refs.root.dataset.stale = "true";
     this.setHighlightedCellInternal(null, false);
     this.scheduleRefresh();
   }

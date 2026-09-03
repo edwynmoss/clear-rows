@@ -812,6 +812,11 @@
 .cr-grid-rows {
   display: flex;
   flex-direction: column;
+  transition: opacity 120ms ease;
+}
+
+.cr-grid[data-stale="true"] .cr-grid-rows {
+  opacity: 0.45;
 }
 
 .cr-row {

@@ -33,7 +33,7 @@ pub struct FilterState {
     pub status: FilterStatus,
     /// Sorted physical (header-excluded) row indices that match the active
     /// filter. `None` means "no filter active" — every row is visible.
-    pub mask: Option<Vec<u64>>,
+    pub mask: Option<Arc<Vec<u64>>>,
 }
 
 impl FilterState {
@@ -109,7 +109,7 @@ pub fn build_filter(options: FilterBuildOptions) -> Result<(), CsvError> {
 
     let matched_rows = mask.len() as u64;
     let mut s = state.lock();
-    s.mask = Some(mask);
+    s.mask = Some(Arc::new(mask));
     s.status.is_filtering = false;
     s.status.is_ready = true;
     s.status.query = Some(query);
@@ -163,7 +163,7 @@ mod tests {
             state: Arc::clone(&state),
         })?;
 
-        let mask = state.lock().mask.clone().unwrap_or_default();
+        let mask = state.lock().mask.as_ref().map(|m| (**m).clone()).unwrap_or_default();
         Ok(mask)
     }
 
@@ -212,7 +212,7 @@ mod tests {
         let state = Arc::new(Mutex::new(FilterState::idle()));
         let generation_state = Arc::new(AtomicU64::new(1));
         // Pre-populate mask so we can assert clear() ran.
-        state.lock().mask = Some(vec![0]);
+        state.lock().mask = Some(Arc::new(vec![0]));
 
         build_filter(FilterBuildOptions {
             source_path: path.to_path_buf(),
