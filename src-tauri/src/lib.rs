@@ -668,11 +668,19 @@ fn clear_csv_export(state: State<'_, AppState>) -> ExportStatus {
 
 #[tauri::command]
 fn startup_csv_path() -> Option<String> {
-    std::env::var("CLEAR_ROWS_OPEN_CSV")
-        .or_else(|_| std::env::var("DATAPARSER_OPEN_CSV"))
-        .ok()
-        .map(|path| path.trim().to_owned())
-        .filter(|path| !path.is_empty())
+    // Double-click / "Open with" / `clear-rows file.csv` all arrive as argv[1].
+    let from_args = std::env::args_os()
+        .skip(1)
+        .map(std::path::PathBuf::from)
+        .find(|candidate| candidate.is_file())
+        .map(|path| path.to_string_lossy().into_owned());
+    from_args.or_else(|| {
+        std::env::var("CLEAR_ROWS_OPEN_CSV")
+            .or_else(|_| std::env::var("DATAPARSER_OPEN_CSV"))
+            .ok()
+            .map(|path| path.trim().to_owned())
+            .filter(|path| !path.is_empty())
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

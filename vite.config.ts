@@ -4,7 +4,8 @@ import tailwindcss from "@tailwindcss/vite";
 export default defineConfig({
   plugins: [tailwindcss()],
   define: {
-    __APP_VERSION__: JSON.stringify("2026.5.5"),
+    // Fallback only; the desktop runtime reads the real version from Tauri.
+    __APP_VERSION__: JSON.stringify(process.env.npm_package_version ?? "0.0.0"),
   },
   clearScreen: false,
   server: {

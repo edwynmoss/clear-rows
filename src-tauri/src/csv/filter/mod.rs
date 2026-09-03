@@ -237,6 +237,37 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+    /// `CLEAR_ROWS_BIG=<csv> cargo test filter_scan_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn filter_scan_timing() {
+        let Ok(path) = std::env::var("CLEAR_ROWS_BIG") else { return };
+        let path = PathBuf::from(path);
+        let first = std::fs::read_to_string(&path).map(|s| s.lines().next().unwrap_or("").to_string()).unwrap_or_default();
+        let headers: Vec<String> = first.split(',').map(|s| s.to_string()).collect();
+        for query in ["powershell", "process:powershell command_line:-enc", "hostname:/^WS-00[0-4]/ -severity=low"] {
+            let started = std::time::Instant::now();
+            let mask = run_build(&path, headers.clone(), query, 0).unwrap();
+            println!("{query:45} -> {:>7} rows in {:?}", mask.len(), started.elapsed());
+        }
+        // parse-only baseline
+        let started = std::time::Instant::now();
+        let mut file = std::fs::File::open(&path).unwrap();
+        use std::io::Seek;
+        file.seek(std::io::SeekFrom::Start(0)).unwrap();
+        let mut parser = crate::csv::parser::CsvUtf8Parser::new(file, b',').unwrap();
+        let mut n = 0u64;
+        while parser.try_read_row().unwrap().is_some() { n += 1; }
+        println!("{:45} -> {:>7} rows in {:?}", "parse only (try_read_row)", n, started.elapsed());
+        let started = std::time::Instant::now();
+        let mut file = std::fs::File::open(&path).unwrap();
+        file.seek(std::io::SeekFrom::Start(0)).unwrap();
+        let mut parser = crate::csv::parser::CsvUtf8Parser::new(file, b',').unwrap();
+        let mut n = 0u64;
+        while parser.try_skip_row().unwrap().is_some() { n += 1; }
+        println!("{:45} -> {:>7} rows in {:?}", "skip only (try_skip_row)", n, started.elapsed());
+    }
+
     #[test]
     fn mask_is_returned_in_ascending_physical_order() {
         let contents = "id,tag\n1,red\n2,green\n3,RED\n4,blue\n5,Red\n";

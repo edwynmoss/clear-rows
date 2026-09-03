@@ -1,119 +1,153 @@
-import type { AppShell } from "../components/app-shell";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getVersion } from "@tauri-apps/api/app";
+
 import { CSV_ROW_HEIGHT_PX } from "./constants";
-import { createAppShell } from "../components/app-shell";
-import { createCsvEmptyState } from "../components/csv-empty-state";
-import { createCsvFilterBar } from "../components/csv-filter-bar";
-import { createCsvPreviewGrid } from "../components/csv-preview-grid";
-import { createColumnVisibilityControl } from "../components/column-visibility-control";
-import { createCsvSearchPanel } from "../components/csv-search-panel";
-import { createExportButton } from "../components/export-button";
-import { createJumpToRow } from "../components/jump-to-row";
-import { createReopenAsControl } from "../components/reopen-as-control";
-import { createSearchResultsTable } from "../components/search-results-table";
-import { createThemeToggle } from "../components/theme-toggle";
+import { directoryOf, fileNameOf, formatBytes, formatEncoding, formatInt, formatRate, pluralize } from "./format";
 import {
+  forgetRecentFile,
+  getRecentFiles,
   getRecentSearchPaths,
   getStoredSearchLimit,
+  getStoredSearchMode,
+  rememberRecentFile,
   storeRecentSearchPaths,
   storeSearchLimit,
+  storeSearchMode,
 } from "./preferences";
-import { CsvGridVirtualizer } from "../csv/grid-virtualizer";
-import { openCsvFromDialog, openCsvFromPath } from "../csv/open-csv-flow";
-import { pickCsvSearchPaths } from "../csv/search-csv-flow";
-import { CsvSession } from "../csv/csv-session";
+import { cycleThemeMode, getThemeMode, isDarkTheme, onThemeChange } from "./theme";
+
+import { createAppShell } from "../components/app-shell";
+import { createCellDetail } from "../components/cell-detail";
+import { createColumnVisibilityControl } from "../components/column-visibility-control";
+import { createCommandPalette, type Command } from "../components/command-palette";
+import { createCsvEmptyState } from "../components/csv-empty-state";
+import { createCsvPreviewGrid } from "../components/csv-preview-grid";
+import { createErrorCard } from "../components/error-card";
+import { createJumpToRow } from "../components/jump-to-row";
+import { createQueryBar, type QueryMode } from "../components/query-bar";
+import { createReopenAsControl, ENCODING_OPTIONS } from "../components/reopen-as-control";
+import { createSearchView } from "../components/search-view";
+import { createStatusBar } from "../components/status-bar";
+import { createToastHost } from "../components/toast";
+import { createTopBar } from "../components/top-bar";
+
 import * as csvApi from "../csv/csv-api";
+import { CsvSession, type ActiveSort } from "../csv/csv-session";
+import { parseFilterQuery, splitFilterTokens, type FilterTerm } from "../csv/filter-query";
+import { CsvGridVirtualizer, type HighlightedCell } from "../csv/grid-virtualizer";
 import { isDesktopRuntime } from "../tauri/runtime";
 import type {
   CsvFileProfileResult,
   CsvSearchMatch,
-  CsvSearchProgress,
   ExportStatus,
   FilterStatus,
+  OpenSummary,
   SortKey,
   SortStatus,
 } from "../types/csv";
-import type { ActiveSort } from "../csv/csv-session";
-import { save } from "@tauri-apps/plugin-dialog";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
 
-const JUMP_POLL_INTERVAL_MS = 200;
-const SEARCH_PROGRESS_POLL_INTERVAL_MS = 200;
-const SORT_PROGRESS_POLL_INTERVAL_MS = 250;
-const FILTER_PROGRESS_POLL_INTERVAL_MS = 250;
-const EXPORT_PROGRESS_POLL_INTERVAL_MS = 250;
+const INDEX_POLL_MS = 350;
+const SEARCH_POLL_MS = 200;
+const SORT_POLL_MS = 250;
+const FILTER_POLL_MS = 200;
+const EXPORT_POLL_MS = 250;
+const JUMP_POLL_MS = 200;
+const GUTTER_WIDTH_PX = 52;
 
 export function mountApplication(host: HTMLElement): void {
-  const hasDesktopRuntime = isDesktopRuntime();
+  const desktop = isDesktopRuntime();
   const session = new CsvSession();
 
-  const grid = createCsvPreviewGrid({ rowHeightPx: CSV_ROW_HEIGHT_PX });
+  // ---------------------------------------------------------------- state
+  let isOpening = false;
+  let openGeneration = 0;
+  let indexGeneration = 0;
+  let isIndexing = false;
+  let searchPaths: string[] = [];
+  let searchProfiles: CsvFileProfileResult[] | null = null;
+  let searchGeneration = 0;
+  let isSearchRunning = false;
+  let resultJumpGeneration = 0;
+  let sortGeneration = 0;
+  let filterGeneration = 0;
+  let exportGeneration = 0;
+  let activeFilterTokens: string[] = [];
+  let pendingFilter: string | null = null;
+  let fileSizeBytes = 0;
+  let appVersion = __APP_VERSION__;
+  let columnMenuEl: HTMLDivElement | null = null;
+
+  // ----------------------------------------------------------- components
+  const toasts = createToastHost();
+  const statusBar = createStatusBar();
+
+  const grid = createCsvPreviewGrid({ rowHeightPx: CSV_ROW_HEIGHT_PX, gutterWidthPx: GUTTER_WIDTH_PX });
   const virtualizer = new CsvGridVirtualizer({
     refs: grid,
     session,
     fetchRows: csvApi.fetchCsvRows,
     rowHeightPx: CSV_ROW_HEIGHT_PX,
+    gutterWidthPx: GUTTER_WIDTH_PX,
+    onHighlightChange: (cell) => updatePositionMeta(cell),
+    onColumnMenu: (columnIndex, anchor) => openColumnMenu(columnIndex, anchor),
   });
 
-  const workspace = document.createElement("div");
-  workspace.className = "flex min-h-0 flex-1 flex-col gap-2 overflow-hidden";
-
-  grid.root.classList.add("hidden", "min-h-0", "flex-1");
-
-  const empty = createCsvEmptyState({
-    onOpenClick: () => {
-      void runOpenFlow();
+  const cellDetail = createCellDetail({
+    onClose: () => {
+      cellDetail.hide();
+      grid.scrollRegion.focus({ preventScroll: true });
     },
-  });
-
-  const searchResults = createSearchResultsTable({
-    onOpenResult: (match) => {
-      void openSearchResult(match);
-    },
-    onViewDataset: () => {
-      revealDataset();
+    onCopy: (text) => void copyText(text, "Copied value"),
+    onFilterToValue: (column, value) => {
+      const needsQuotes = /[\s:"=/]/.test(value);
+      const term = `${quoteColumn(column)}=${needsQuotes ? `"${value.replace(/"/g, '""')}"` : value}`;
+      void applyFilter(appendTerm(term));
     },
   });
 
-  let shell!: AppShell;
-  let isOpening = false;
-  let searchPaths: string[] = [];
-  let searchGeneration = 0;
-  let isSearchRunning = false;
-  let isSearchCancelling = false;
-  let resultJumpGeneration = 0;
-  let sortGeneration = 0;
-  let filterGeneration = 0;
-  let exportGeneration = 0;
+  const jumpToRow = createJumpToRow({
+    onApply: (rowNumber) => void runJumpToRow(rowNumber),
+  });
 
-  const searchPanel = createCsvSearchPanel({
-    initialLimit: getStoredSearchLimit(),
-    hasRecentSearchSet: getRecentSearchPaths().length > 0,
-    onPickFiles: () => {
-      void pickSearchFiles();
-    },
-    onRestoreRecentSearchSet: () => {
-      void restoreRecentSearchSet();
-    },
-    onSearch: (query, limit) => {
-      void runSearch(query, limit);
-    },
-    onLimitChange: (limit) => {
-      storeSearchLimit(limit);
-    },
-    onCancelSearch: () => {
-      void cancelSearch();
+  const gridArea = document.createElement("div");
+  gridArea.className = "cr-gridarea";
+  const gridColumn = document.createElement("div");
+  gridColumn.className = "cr-gridcolumn";
+  gridColumn.append(jumpToRow.root, grid.root);
+  gridArea.append(gridColumn, cellDetail.root);
+
+  const emptyState = createCsvEmptyState({
+    onOpenClick: () => void runOpenDialog(),
+    onOpenRecent: (path) => void openPath(path),
+    onForgetRecent: (path) => {
+      forgetRecentFile(path);
+      emptyState.setRecent(getRecentFiles());
     },
   });
+
+  const searchView = createSearchView({
+    onOpenResult: (match) => void openSearchResult(match),
+    onEditFiles: () => void pickSearchFiles(),
+    onBackToFile: () => showFileView(),
+  });
+
+  const errorCard = createErrorCard({
+    encodings: ENCODING_OPTIONS,
+    onReopen: (encoding) => {
+      if (!lastOpenAttempt) return;
+      errorCard.hide();
+      void openPath(lastOpenAttempt, { encodingOverride: encoding });
+    },
+    onDismiss: () => showFileView(),
+    onOpenOther: () => void runOpenDialog(),
+  });
+  let lastOpenAttempt: string | null = null;
 
   const reopenAsControl = createReopenAsControl({
     onApply: ({ delimiter, encoding }) => {
-      void runReopenAs(delimiter, encoding);
-    },
-  });
-
-  const exportButton = createExportButton({
-    onClick: () => {
-      void runExportFlow();
+      if (!session.path) return;
+      void openPath(session.path, { delimiterOverride: delimiter, encodingOverride: encoding });
     },
   });
 
@@ -124,1127 +158,1280 @@ export function mountApplication(host: HTMLElement): void {
     },
   });
 
-  const filterBar = createCsvFilterBar({
-    onApply: (query) => {
-      void runFilterFlow(query);
+  const themeButton = document.createElement("button");
+  themeButton.type = "button";
+  themeButton.className = "cr-icon-btn";
+  function syncThemeButton(): void {
+    const mode = getThemeMode();
+    themeButton.title = `Theme: ${mode === "system" ? "follows system" : mode} · click to change`;
+    themeButton.setAttribute("aria-label", themeButton.title);
+    themeButton.innerHTML = isDarkTheme()
+      ? `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>`
+      : `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4"/></svg>`;
+  }
+  themeButton.addEventListener("click", () => {
+    const mode = cycleThemeMode();
+    syncThemeButton();
+    toasts.show({ title: `Theme: ${mode === "system" ? "follows system" : mode}`, duration: 1800 });
+  });
+  onThemeChange(() => syncThemeButton());
+  syncThemeButton();
+
+  const paletteButton = document.createElement("button");
+  paletteButton.type = "button";
+  paletteButton.className = "cr-btn cr-btn-secondary cr-palette-trigger";
+  paletteButton.innerHTML = `<span>Commands</span><kbd>Ctrl K</kbd>`;
+  paletteButton.addEventListener("click", () => palette.open());
+
+  const topBar = createTopBar({
+    onOpen: () => void runOpenDialog(),
+    onExport: () => void runExport(),
+    onFileChipClick: () => reopenAsControl.toggle(),
+    fileChipExtras: [reopenAsControl.root],
+    trailing: [columnVisibilityControl.root, paletteButton, themeButton],
+  });
+
+  const queryBar = createQueryBar({
+    initialMode: getStoredSearchMode(),
+    initialLimit: getStoredSearchLimit(),
+    onSubmit: (mode, query, limit) => {
+      if (mode === "file") void applyFilter(query);
+      else void runSearch(query, limit);
     },
-    onClear: () => {
-      void runClearFilter();
+    onClear: (mode) => {
+      if (mode === "file") void clearFilter();
+      else {
+        searchGeneration++;
+        searchView.clear();
+      }
+    },
+    onCancel: () => void cancelCurrent(),
+    onModeChange: (mode) => {
+      storeSearchMode(mode);
+      syncModeView(mode);
+    },
+    onLimitChange: (limit) => storeSearchLimit(limit),
+    onPickFiles: () => void pickSearchFiles(),
+    onRemoveTerm: (index) => {
+      const next = activeFilterTokens.filter((_, i) => i !== index);
+      void applyFilter(next.join(" "));
     },
   });
 
-  const jumpToRow = createJumpToRow({
-    onApply: (rowNumber) => {
-      void runJumpToRow(rowNumber);
-    },
+  const palette = createCommandPalette({ commands: () => buildCommands() });
+
+  const shell = createAppShell({
+    topBar: topBar.root,
+    queryBar: queryBar.root,
+    statusBar: statusBar.root,
+    toasts: toasts.root,
+    overlays: [palette.root],
   });
 
-  async function runJumpToRow(rowNumber: number): Promise<void> {
-    if (!session.path) {
+  shell.showView(emptyState.root);
+  shell.main.append(gridArea, searchView.root, errorCard.root);
+  gridArea.hidden = true;
+  searchView.root.hidden = true;
+  errorCard.root.hidden = true;
+
+  emptyState.setRecent(getRecentFiles());
+  statusBar.setMeta({ version: `v${appVersion}` });
+  statusBar.setMessage("Ready", "neutral");
+  syncAvailability();
+  virtualizer.bind();
+  host.replaceChildren(shell.root);
+
+  if (desktop) {
+    void getVersion()
+      .then((version) => {
+        appVersion = version;
+        statusBar.setMeta({ version: `v${version}` });
+      })
+      .catch(() => undefined);
+    void openStartupFile();
+    wireFileDrop();
+  }
+
+  // ------------------------------------------------------------ views
+  function showFileView(): void {
+    errorCard.hide();
+    if (session.path) {
+      shell.showView(gridArea);
+    } else {
+      shell.showView(emptyState.root);
+    }
+    searchView.root.hidden = true;
+    queryBar.setMode("file");
+    syncAvailability();
+  }
+
+  function showSearchView(): void {
+    errorCard.hide();
+    shell.showView(searchView.root);
+    gridArea.hidden = true;
+    emptyState.root.hidden = true;
+  }
+
+  function syncModeView(mode: QueryMode): void {
+    if (mode === "files") {
+      showSearchView();
+      if (searchPaths.length === 0) {
+        searchView.setFiles([], null);
+        searchView.clear();
+      }
+    } else {
+      showFileView();
+    }
+    syncAvailability();
+  }
+
+  function syncAvailability(): void {
+    queryBar.setAvailability({
+      hasFile: session.path !== null,
+      searchFileCount: searchPaths.length,
+      searchFileBytes: 0,
+    });
+    searchView.setHasFile(session.path !== null);
+    columnVisibilityControl.setEnabled(session.path !== null);
+    reopenAsControl.setEnabled(session.path !== null);
+  }
+
+  function syncFileChip(): void {
+    if (!session.path || !session.profile) {
+      topBar.setFile(null);
+      statusBar.setMeta({ encoding: "", delimiter: "", position: "" });
+      return;
+    }
+    const profile = session.profile;
+    topBar.setFile({
+      name: fileNameOf(session.path),
+      rows: session.rowCount,
+      columns: session.headers.length,
+      sizeBytes: fileSizeBytes,
+      encoding: profile.encoding,
+      encodingSource: profile.encoding_source,
+      delimiterLabel: profile.delimiter_label,
+      isIndexing,
+      hasWarning: profile.warnings.some((w) => !isSoftWarning(w)) || profile.encoding === "utf-8-lossy",
+    });
+    statusBar.setMeta({
+      encoding: formatEncoding(profile.encoding),
+      delimiter: profile.delimiter_label ?? "",
+    });
+    reopenAsControl.setDefaults({
+      delimiterChar: typeof profile.delimiter === "number" ? String.fromCharCode(profile.delimiter) : null,
+      encoding: profile.encoding,
+    });
+  }
+
+  function updatePositionMeta(cell: HighlightedCell | null): void {
+    if (!cell || !session.path) {
+      statusBar.setMeta({ position: "" });
+      return;
+    }
+    const total = session.scrollRowCount;
+    statusBar.setMeta({ position: `row ${formatInt(cell.rowIndex + 1)} of ${formatInt(total)}` });
+  }
+
+  // ------------------------------------------------------------- open
+  async function runOpenDialog(): Promise<void> {
+    if (!desktop) {
+      toasts.show({ title: "Opening files needs the desktop app", tone: "warning" });
+      return;
+    }
+    if (isOpening) return;
+    let selection: string | string[] | null;
+    try {
+      selection = await openDialog({
+        multiple: false,
+        filters: [{ name: "Delimited text", extensions: ["csv", "tsv", "txt", "tab", "dat", "log"] }],
+      });
+    } catch (err) {
+      toasts.show({ title: "Could not open the file dialog", detail: formatError(err), tone: "negative" });
+      return;
+    }
+    if (!selection || Array.isArray(selection)) return;
+    await openPath(selection);
+  }
+
+  async function openPath(path: string, overrides: { delimiterOverride?: string; encodingOverride?: string } = {}): Promise<void> {
+    if (isOpening) return;
+    isOpening = true;
+    const generation = ++openGeneration;
+    indexGeneration++;
+    resultJumpGeneration++;
+    sortGeneration++;
+    filterGeneration++;
+    exportGeneration++;
+    pendingFilter = null;
+    lastOpenAttempt = path;
+    virtualizer.setPendingSortColumn(null);
+    cellDetail.hide();
+    closeColumnMenu();
+    toasts.clear();
+    statusBar.setActivity({ label: "opening", ratio: null, detail: fileNameOf(path) });
+    statusBar.setMessage("", "neutral");
+
+    let summary: OpenSummary;
+    try {
+      summary = await csvApi.openCsv(path, overrides);
+    } catch (err) {
+      isOpening = false;
+      if (generation !== openGeneration) return;
+      statusBar.setActivity(null);
+      const message = formatError(err);
+      const encodingIssue = /encoding|binary/i.test(message);
+      errorCard.show({
+        title: encodingIssue ? "Couldn't read this file as text" : "Couldn't open this file",
+        message: encodingIssue
+          ? `${fileNameOf(path)} looks binary or uses an encoding that wasn't recognised. Pick the encoding it was saved in and try again.`
+          : message,
+        preview: null,
+        currentEncoding: overrides.encodingOverride ?? null,
+        offerReopen: encodingIssue,
+        isWarning: false,
+      });
+      shell.showView(errorCard.root);
+      statusBar.setMessage(message, "negative");
       return;
     }
 
-    const max = Math.max(0, session.scrollRowCount);
-    if (max === 0) {
-      jumpToRow.setStatus("No rows to jump to.", "negative");
+    if (generation !== openGeneration) {
+      isOpening = false;
       return;
     }
 
-    if (rowNumber < 1 || rowNumber > max) {
-      jumpToRow.setStatus(
-        `Row ${rowNumber.toLocaleString()} is out of range (1–${max.toLocaleString()}).`,
-        "negative",
-      );
+    session.applySummary(summary);
+    fileSizeBytes = summary.file_size;
+    activeFilterTokens = [];
+    queryBar.setChips([]);
+    queryBar.setCount(null, null);
+    queryBar.setError(null);
+    queryBar.setValue("");
+    virtualizer.reset();
+    virtualizer.updateAria();
+    columnVisibilityControl.setColumns(session.headers, session.hiddenColumns);
+    jumpToRow.close();
+    isIndexing = !summary.is_complete && !summary.error;
+    virtualizer.setIndexing(isIndexing);
+    syncFileChip();
+    syncAvailability();
+    showFileView();
+    rememberRecentFile({ path, rows: summary.is_complete ? summary.row_count : undefined, sizeBytes: summary.file_size });
+    emptyState.setRecent(getRecentFiles());
+
+    // Column widths from the header and a sample of rows.
+    try {
+      const sampleCount = Math.min(64, summary.row_count);
+      const sample = sampleCount > 0 ? await csvApi.fetchCsvRows(0, sampleCount, 0, session.headers.length) : { rows: [] as string[][] };
+      if (generation === openGeneration) virtualizer.autoFitColumns(sample.rows);
+    } catch {
+      // Keep default widths.
+    }
+    await virtualizer.refresh();
+    isOpening = false;
+
+    if (summary.error) {
+      statusBar.setActivity(null);
+      statusBar.setMessage(summary.error, "negative");
+      toasts.show({ title: "Indexing stopped", detail: summary.error, tone: "negative" });
       return;
     }
+
+    surfaceProfileWarnings(summary);
+
+    if (summary.is_complete) {
+      statusBar.setActivity(null);
+      statusBar.setMessage(`${pluralize(summary.row_count, "row")} · ${pluralize(session.headers.length, "column")}`, "neutral");
+      return;
+    }
+
+    void pollIndexing(generation, summary.indexed_bytes);
+  }
+
+  function surfaceProfileWarnings(summary: OpenSummary): void {
+    const profile = summary.profile;
+    const warning = profile.warnings.find((w) => !isSoftWarning(w));
+    if (profile.encoding === "utf-8-lossy") {
+      toasts.show({
+        title: "Some characters couldn't be decoded",
+        detail: "The file isn't valid UTF-8. Choose the encoding it was saved in.",
+        tone: "warning",
+        duration: 0,
+        action: { label: "Change encoding", onClick: () => reopenAsControl.toggle() },
+      });
+      return;
+    }
+    if (profile.encoding_source === "detected" && !profile.encoding.startsWith("utf-")) {
+      toasts.show({
+        title: `Decoded as ${formatEncoding(profile.encoding)}`,
+        detail: "Detected from the file's bytes. If text looks wrong, pick another encoding.",
+        tone: "neutral",
+        duration: 7000,
+        action: { label: "Change", onClick: () => reopenAsControl.toggle() },
+      });
+    }
+    if (warning) {
+      toasts.show({ title: warning, tone: "warning", duration: 8000 });
+    }
+  }
+
+  async function pollIndexing(generation: number, startBytes: number): Promise<void> {
+    const gen = ++indexGeneration;
+    let lastBytes = startBytes;
+    let lastTime = performance.now();
+    let rate = 0;
+    while (generation === openGeneration && gen === indexGeneration) {
+      await wait(INDEX_POLL_MS);
+      if (generation !== openGeneration || gen !== indexGeneration) return;
+      let status;
+      try {
+        status = await csvApi.getCsvIndexStatus();
+      } catch (err) {
+        statusBar.setActivity(null);
+        statusBar.setMessage(`Index status error: ${formatError(err)}`, "negative");
+        return;
+      }
+      if (generation !== openGeneration || gen !== indexGeneration || status.path !== session.path) return;
+
+      const change = session.applyIndexStatus(status);
+      virtualizer.updateAria();
+      if (change.scrollExtentChanged || virtualizer.isViewportPastRow(change.previousRowCount)) {
+        virtualizer.scheduleRefresh();
+      }
+
+      const now = performance.now();
+      const seconds = (now - lastTime) / 1000;
+      if (seconds > 0.5) {
+        const instant = (status.indexed_bytes - lastBytes) / seconds;
+        rate = rate === 0 ? instant : rate * 0.6 + instant * 0.4;
+        lastBytes = status.indexed_bytes;
+        lastTime = now;
+      }
+      const ratio = status.file_size > 0 ? status.indexed_bytes / status.file_size : null;
+      statusBar.setActivity({
+        label: "indexing",
+        ratio,
+        detail: `${formatInt(status.row_count)} rows · ${formatBytes(status.indexed_bytes)} of ${formatBytes(status.file_size)}${rate > 0 ? ` · ${formatRate(rate)}` : ""}`,
+      });
+      syncFileChip();
+
+      if (status.error) {
+        isIndexing = false;
+        virtualizer.setIndexing(false);
+        statusBar.setActivity(null);
+        statusBar.setMessage(status.error, "negative");
+        toasts.show({ title: "Indexing stopped", detail: status.error, tone: "negative" });
+        syncFileChip();
+        return;
+      }
+      if (status.is_complete) {
+        isIndexing = false;
+        virtualizer.setIndexing(false);
+        virtualizer.scheduleRefresh();
+        statusBar.setActivity(null);
+        statusBar.setMessage(`${pluralize(status.row_count, "row")} · ${pluralize(session.headers.length, "column")}`, "neutral");
+        syncFileChip();
+        rememberRecentFile({ path: session.path ?? "", rows: status.row_count, sizeBytes: status.file_size });
+        if (pendingFilter !== null) {
+          const query = pendingFilter;
+          pendingFilter = null;
+          void applyFilter(query);
+        }
+        return;
+      }
+    }
+  }
+
+  async function openStartupFile(): Promise<void> {
+    try {
+      const path = await csvApi.getStartupCsvPath();
+      if (path) await openPath(path);
+    } catch (err) {
+      toasts.show({ title: "Startup file could not be opened", detail: formatError(err), tone: "negative" });
+    }
+  }
+
+  function wireFileDrop(): void {
+    void getCurrentWebview().onDragDropEvent((event) => {
+      const payload = event.payload;
+      if (payload.type === "over" || payload.type === "enter") {
+        emptyState.setDragOver(true);
+        gridArea.dataset.dragOver = "true";
+        return;
+      }
+      emptyState.setDragOver(false);
+      delete gridArea.dataset.dragOver;
+      if (payload.type !== "drop") return;
+      const path = payload.paths.find((candidate) => candidate.length > 0);
+      if (path) void openPath(path);
+    });
+  }
+
+  // ------------------------------------------------------------ filter
+  function quoteColumn(column: string): string {
+    return /[\s:"=/]/.test(column) ? `"${column}"` : column;
+  }
+
+  function appendTerm(term: string): string {
+    return [...activeFilterTokens, term].join(" ");
+  }
+
+  async function applyFilter(query: string): Promise<void> {
+    if (!session.path || isOpening) return;
+    const trimmed = query.trim();
+    queryBar.setValue(trimmed);
+    queryBar.setError(null);
+
+    if (trimmed.length === 0) {
+      await clearFilter();
+      return;
+    }
+
+    const parsed = parseFilterQuery(trimmed, session.headers);
+    if (parsed.error) {
+      queryBar.setError(parsed.error);
+      return;
+    }
+    if (parsed.terms.length === 0) {
+      await clearFilter();
+      return;
+    }
+
+    if (isIndexing) {
+      pendingFilter = trimmed;
+      queryBar.setChips(parsed.terms);
+      statusBar.setMessage("Filter will run when indexing finishes", "busy");
+      return;
+    }
+
+    const generation = ++filterGeneration;
+    queryBar.setBusy(true);
+    statusBar.setActivity({ label: "filtering", ratio: null, detail: "", onCancel: () => void clearFilter() });
 
     try {
-      // 1-indexed in the UI; scrollToCell takes a 0-indexed scroll-row position.
-      await virtualizer.scrollToCell(rowNumber - 1, 0);
-      shell.status.setText(`Jumped to row ${rowNumber.toLocaleString()}.`, "positive");
+      await csvApi.startCsvFilter(trimmed);
+    } catch (err) {
+      if (generation !== filterGeneration) return;
+      queryBar.setBusy(false);
+      statusBar.setActivity(null);
+      queryBar.setError(formatError(err));
+      return;
+    }
+
+    let tokens: string[] = [];
+    try {
+      tokens = splitFilterTokens(trimmed);
+    } catch {
+      tokens = [trimmed];
+    }
+    await pollFilter(generation, trimmed, tokens, parsed.terms);
+  }
+
+  async function pollFilter(generation: number, query: string, tokens: string[], terms: FilterTerm[]): Promise<void> {
+    while (generation === filterGeneration) {
+      let status: FilterStatus;
+      try {
+        status = await csvApi.getCsvFilterStatus();
+      } catch (err) {
+        if (generation !== filterGeneration) return;
+        queryBar.setBusy(false);
+        statusBar.setActivity(null);
+        queryBar.setError(formatError(err));
+        return;
+      }
+      if (generation !== filterGeneration) return;
+
+      if (status.error) {
+        queryBar.setBusy(false);
+        statusBar.setActivity(null);
+        queryBar.setError(status.error);
+        return;
+      }
+      if (status.is_ready && !status.is_filtering) {
+        session.applyActiveFilter({ query, matchedRows: status.matched_rows });
+        activeFilterTokens = tokens;
+        queryBar.setChips(terms);
+        queryBar.setCount(status.matched_rows, status.total_rows);
+        queryBar.setBusy(false);
+        statusBar.setActivity(null);
+        statusBar.setMessage(
+          status.matched_rows === 0 ? "No rows match" : `${formatInt(status.matched_rows)} of ${formatInt(status.total_rows)} rows match`,
+          status.matched_rows === 0 ? "warning" : "neutral",
+        );
+        virtualizer.resetRowsForVisibilityChange();
+        virtualizer.updateAria();
+        jumpToRow.setMaxRow(session.scrollRowCount);
+        return;
+      }
+      if (!status.is_filtering && !status.is_ready) {
+        queryBar.setBusy(false);
+        statusBar.setActivity(null);
+        return;
+      }
+      statusBar.setActivity({
+        label: "filtering",
+        ratio: status.total_rows > 0 ? status.rows_scanned / status.total_rows : null,
+        detail: `${formatInt(status.rows_scanned)} of ${formatInt(status.total_rows)} rows · ${formatInt(status.matched_rows)} match`,
+        onCancel: () => void clearFilter(),
+      });
+      await wait(FILTER_POLL_MS);
+    }
+  }
+
+  async function clearFilter(): Promise<void> {
+    if (!session.path) return;
+    const generation = ++filterGeneration;
+    pendingFilter = null;
+    try {
+      await csvApi.clearCsvFilter();
+    } catch (err) {
+      if (generation === filterGeneration) queryBar.setError(formatError(err));
+      return;
+    }
+    if (generation !== filterGeneration) return;
+    const hadFilter = session.activeFilter !== null;
+    session.applyActiveFilter(null);
+    activeFilterTokens = [];
+    queryBar.setChips([]);
+    queryBar.setCount(null, null);
+    queryBar.setBusy(false);
+    queryBar.setValue("");
+    statusBar.setActivity(null);
+    if (hadFilter) statusBar.setMessage(`${pluralize(session.rowCount, "row")}`, "neutral");
+    virtualizer.resetRowsForVisibilityChange();
+    virtualizer.updateAria();
+    jumpToRow.setMaxRow(session.scrollRowCount);
+  }
+
+  // -------------------------------------------------------------- sort
+  async function runSort(columnIndex: number, addToCurrent: boolean): Promise<void> {
+    if (!session.path || isOpening) return;
+    if (columnIndex < 0 || columnIndex >= session.headers.length) return;
+    if (isIndexing) {
+      toasts.show({ title: "Sorting is available once indexing finishes", tone: "neutral", duration: 2500 });
+      return;
+    }
+    const generation = ++sortGeneration;
+    const keys = nextSortKeys(session.activeSort, columnIndex, addToCurrent);
+    await applySortKeys(generation, keys, columnIndex);
+  }
+
+  async function setSortDirection(columnIndex: number, direction: "asc" | "desc"): Promise<void> {
+    if (!session.path || isIndexing) return;
+    const generation = ++sortGeneration;
+    await applySortKeys(generation, [{ column: columnIndex, direction }], columnIndex);
+  }
+
+  async function applySortKeys(generation: number, keys: SortKey[], pendingColumn: number): Promise<void> {
+    if (keys.length === 0) {
+      try {
+        await csvApi.clearCsvSort();
+        if (generation !== sortGeneration) return;
+        session.activeSort = [];
+        virtualizer.setPendingSortColumn(null);
+        virtualizer.resetRowsForVisibilityChange();
+        statusBar.setMessage("Sort cleared", "neutral");
+      } catch (err) {
+        if (generation === sortGeneration) toasts.show({ title: "Couldn't clear sort", detail: formatError(err), tone: "negative" });
+      }
+      return;
+    }
+    const summary = describeSortKeys(keys, session.headers);
+    virtualizer.setPendingSortColumn(pendingColumn);
+    statusBar.setActivity({ label: "sorting", ratio: null, detail: summary });
+    try {
+      await csvApi.startCsvSort(keys);
+    } catch (err) {
+      if (generation !== sortGeneration) return;
+      virtualizer.setPendingSortColumn(null);
+      statusBar.setActivity(null);
+      toasts.show({ title: "Couldn't sort", detail: formatError(err), tone: "negative" });
+      return;
+    }
+    await pollSort(generation, keys, summary);
+  }
+
+  async function pollSort(generation: number, keys: SortKey[], summary: string): Promise<void> {
+    while (generation === sortGeneration) {
+      let status: SortStatus;
+      try {
+        status = await csvApi.getCsvSortStatus();
+      } catch (err) {
+        if (generation !== sortGeneration) return;
+        virtualizer.setPendingSortColumn(null);
+        statusBar.setActivity(null);
+        toasts.show({ title: "Sort status error", detail: formatError(err), tone: "negative" });
+        return;
+      }
+      if (generation !== sortGeneration) return;
+      if (status.error) {
+        virtualizer.setPendingSortColumn(null);
+        statusBar.setActivity(null);
+        toasts.show({ title: "Couldn't sort", detail: status.error, tone: "negative" });
+        return;
+      }
+      if (status.is_ready && !status.is_sorting) {
+        session.activeSort = status.keys.length > 0 ? status.keys : keys;
+        virtualizer.setPendingSortColumn(null);
+        virtualizer.resetRowsForVisibilityChange();
+        statusBar.setActivity(null);
+        statusBar.setMessage(`Sorted ${summary}`, "neutral");
+        return;
+      }
+      if (!status.is_sorting && !status.is_ready) {
+        virtualizer.setPendingSortColumn(null);
+        statusBar.setActivity(null);
+        return;
+      }
+      statusBar.setActivity({
+        label: "sorting",
+        ratio: status.total_rows > 0 ? status.rows_scanned / status.total_rows : null,
+        detail: `${summary} · ${formatInt(status.rows_scanned)} of ${formatInt(status.total_rows)} rows`,
+      });
+      await wait(SORT_POLL_MS);
+    }
+  }
+
+  function nextSortKeys(activeSort: ActiveSort, columnIndex: number, addToCurrent: boolean): SortKey[] {
+    if (!addToCurrent) {
+      const isSoleKey = activeSort.length === 1 && activeSort[0].column === columnIndex;
+      if (!isSoleKey) return [{ column: columnIndex, direction: "asc" }];
+      if (activeSort[0].direction === "asc") return [{ column: columnIndex, direction: "desc" }];
+      return [];
+    }
+    const existingIndex = activeSort.findIndex((k) => k.column === columnIndex);
+    if (existingIndex < 0) return [...activeSort, { column: columnIndex, direction: "asc" }];
+    const next = activeSort.slice();
+    if (activeSort[existingIndex].direction === "asc") {
+      next[existingIndex] = { column: columnIndex, direction: "desc" };
+      return next;
+    }
+    next.splice(existingIndex, 1);
+    return next;
+  }
+
+  function describeSortKeys(keys: SortKey[], headers: string[]): string {
+    const parts = keys.map((key) => `${headers[key.column] || `column ${key.column + 1}`} ${key.direction === "asc" ? "↑" : "↓"}`);
+    return parts.length === 1 ? `by ${parts[0]}` : `by ${parts.join(", then ")}`;
+  }
+
+  // ------------------------------------------------------------ export
+  async function runExport(presetTarget?: string): Promise<void> {
+    if (!session.path || isOpening) return;
+    const defaultName = suggestExportFileName(session.path, session.activeFilter, session.activeSort);
+    let target: string | null = presetTarget ?? null;
+    if (!target) {
+      try {
+        target = await saveDialog({ defaultPath: defaultName, filters: [{ name: "CSV", extensions: ["csv"] }] });
+      } catch (err) {
+        toasts.show({ title: "Could not open the save dialog", detail: formatError(err), tone: "negative" });
+        return;
+      }
+    }
+    if (!target) return;
+
+    const generation = ++exportGeneration;
+    topBar.setExportBusy(true);
+    statusBar.setActivity({ label: "exporting", ratio: null, detail: fileNameOf(target), onCancel: () => void csvApi.cancelCsvExport() });
+    const started = Date.now();
+
+    let initial: ExportStatus;
+    try {
+      initial = await csvApi.startCsvExport(target, session.visibleColumnIndices());
+    } catch (err) {
+      if (generation !== exportGeneration) return;
+      topBar.setExportBusy(false);
+      statusBar.setActivity(null);
+      toasts.show({ title: "Export failed", detail: formatError(err), tone: "negative" });
+      return;
+    }
+    if (generation !== exportGeneration) return;
+    if (initial.error) {
+      topBar.setExportBusy(false);
+      statusBar.setActivity(null);
+      toasts.show({ title: "Export failed", detail: initial.error, tone: "negative" });
+      return;
+    }
+
+    while (generation === exportGeneration) {
+      await wait(EXPORT_POLL_MS);
+      let status: ExportStatus;
+      try {
+        status = await csvApi.getCsvExportStatus();
+      } catch (err) {
+        if (generation !== exportGeneration) return;
+        topBar.setExportBusy(false);
+        statusBar.setActivity(null);
+        toasts.show({ title: "Export status error", detail: formatError(err), tone: "negative" });
+        return;
+      }
+      if (generation !== exportGeneration) return;
+      if (status.error) {
+        topBar.setExportBusy(false);
+        statusBar.setActivity(null);
+        toasts.show({ title: "Export failed", detail: status.error, tone: "negative" });
+        return;
+      }
+      if (status.is_complete && !status.is_running) {
+        topBar.setExportBusy(false);
+        statusBar.setActivity(null);
+        const seconds = ((Date.now() - started) / 1000).toFixed(1);
+        toasts.show({
+          title: `Exported ${pluralize(status.rows_written, "row")} → ${fileNameOf(target)}`,
+          detail: `${directoryOf(target)} · ${seconds} s`,
+          tone: "positive",
+          duration: 8000,
+        });
+        statusBar.setMessage(`Exported ${pluralize(status.rows_written, "row")}`, "neutral");
+        return;
+      }
+      if (!status.is_running && !status.is_complete) {
+        topBar.setExportBusy(false);
+        statusBar.setActivity(null);
+        statusBar.setMessage("Export cancelled", "neutral");
+        return;
+      }
+      statusBar.setActivity({
+        label: "exporting",
+        ratio: status.total_rows > 0 ? status.rows_written / status.total_rows : null,
+        detail: `${formatInt(status.rows_written)} of ${formatInt(status.total_rows)} rows`,
+        onCancel: () => void csvApi.cancelCsvExport(),
+      });
+    }
+  }
+
+  function suggestExportFileName(sourcePath: string, filter: { query: string } | null, sort: ActiveSort): string {
+    const base = fileNameOf(sourcePath);
+    const dot = base.lastIndexOf(".");
+    const stem = dot > 0 ? base.slice(0, dot) : base;
+    const tags: string[] = [];
+    if (filter) tags.push("filtered");
+    if (sort.length > 0) tags.push("sorted");
+    return `${stem}${tags.length > 0 ? `-${tags.join("-")}` : "-export"}.csv`;
+  }
+
+  // ------------------------------------------------------------ search
+  async function pickSearchFiles(): Promise<void> {
+    if (!desktop) return;
+    let selection: string | string[] | null;
+    try {
+      selection = await openDialog({
+        multiple: true,
+        filters: [{ name: "Delimited text", extensions: ["csv", "tsv", "txt", "tab", "dat", "log"] }],
+      });
+    } catch (err) {
+      toasts.show({ title: "Could not open the file dialog", detail: formatError(err), tone: "negative" });
+      return;
+    }
+    if (!selection) return;
+    const paths = Array.isArray(selection) ? selection : [selection];
+    await applySearchFiles(paths, true);
+  }
+
+  async function applySearchFiles(paths: string[], persist: boolean): Promise<void> {
+    searchPaths = paths;
+    searchProfiles = null;
+    queryBar.setMode("files");
+    storeSearchMode("files");
+    showSearchView();
+    searchView.setFiles(paths, null);
+    searchView.clear();
+    syncAvailability();
+    try {
+      searchProfiles = await csvApi.profileCsvFiles(paths);
+      searchView.setFiles(paths, searchProfiles);
+      searchView.clear();
+      const binary = searchProfiles.filter((p) => p.profile?.binary_like).length;
+      if (binary > 0) {
+        toasts.show({ title: `${pluralize(binary, "file")} look binary and will be skipped`, tone: "warning" });
+      }
+    } catch (err) {
+      toasts.show({ title: "Couldn't profile the selected files", detail: formatError(err), tone: "negative" });
+    }
+    if (persist) storeRecentSearchPaths(paths);
+    queryBar.focus();
+  }
+
+  async function runSearch(query: string, limit: number): Promise<void> {
+    const trimmed = query.trim();
+    if (trimmed.length === 0) return;
+    if (searchPaths.length === 0) {
+      await pickSearchFiles();
+      if (searchPaths.length === 0) return;
+    }
+    const generation = ++searchGeneration;
+    storeSearchLimit(limit);
+    isSearchRunning = true;
+    showSearchView();
+    searchView.clear();
+    queryBar.setBusy(true);
+    statusBar.setActivity({ label: "searching", ratio: null, detail: `“${trimmed}”`, onCancel: () => void cancelCurrent() });
+    void pollSearch(generation);
+
+    try {
+      const summary = await csvApi.searchCsvFiles(searchPaths, trimmed, limit);
+      if (generation !== searchGeneration) return;
+      searchView.setProgress(null);
+      searchView.setSummary(summary);
+      searchView.setActiveMatch(null);
+      statusBar.setActivity(null);
+      statusBar.setMessage(
+        summary.cancelled
+          ? `Search cancelled · ${pluralize(summary.matches.length, "match", "matches")} kept`
+          : `${pluralize(summary.matches.length, "match", "matches")} in ${pluralize(summary.matched_files, "file")}`,
+        summary.errors.length > 0 ? "warning" : "neutral",
+      );
+      if (summary.truncated) {
+        toasts.show({ title: `Stopped at the ${formatInt(limit)} match limit`, detail: "Raise the limit or narrow the search.", tone: "neutral" });
+      }
+      for (const error of summary.errors.slice(0, 2)) {
+        toasts.show({ title: fileNameOf(error.path), detail: error.message, tone: "warning", duration: 8000 });
+      }
+    } catch (err) {
+      if (generation !== searchGeneration) return;
+      statusBar.setActivity(null);
+      toasts.show({ title: "Search failed", detail: formatError(err), tone: "negative" });
+    } finally {
+      if (generation === searchGeneration) {
+        isSearchRunning = false;
+        queryBar.setBusy(false);
+      }
+    }
+  }
+
+  async function pollSearch(generation: number): Promise<void> {
+    while (generation === searchGeneration && isSearchRunning) {
+      await wait(SEARCH_POLL_MS);
+      if (generation !== searchGeneration || !isSearchRunning) return;
+      try {
+        const progress = await csvApi.getCsvSearchProgress();
+        if (generation !== searchGeneration || !isSearchRunning) return;
+        searchView.setProgress(progress);
+        statusBar.setActivity({
+          label: "searching",
+          ratio: progress.total_files > 0 ? progress.completed_files / progress.total_files : null,
+          detail: `${formatInt(progress.completed_files)} of ${formatInt(progress.total_files)} files · ${formatInt(progress.matches)} match${progress.matches === 1 ? "" : "es"}`,
+          onCancel: () => void cancelCurrent(),
+        });
+        if (!progress.is_running) return;
+      } catch {
+        return;
+      }
+    }
+  }
+
+  async function cancelCurrent(): Promise<void> {
+    if (isSearchRunning) {
+      try {
+        await csvApi.cancelCsvSearch();
+      } catch (err) {
+        toasts.show({ title: "Couldn't cancel", detail: formatError(err), tone: "negative" });
+      }
+      return;
+    }
+    if (session.activeFilter === null && filterGeneration > 0) {
+      await clearFilter();
+    }
+  }
+
+  async function openSearchResult(match: CsvSearchMatch): Promise<void> {
+    if (isOpening) return;
+    const generation = ++resultJumpGeneration;
+    const targetRowIndex = Math.max(0, match.row_index - 1);
+    searchView.setActiveMatch(match);
+
+    if (session.path !== match.path) {
+      await openPath(match.path);
+    } else {
+      showFileView();
+    }
+    if (generation !== resultJumpGeneration || session.path !== match.path) return;
+
+    while (generation === resultJumpGeneration && session.path === match.path) {
+      if (targetRowIndex < session.rowCount) {
+        await virtualizer.scrollToCell(targetRowIndex, match.column_index);
+        statusBar.setMessage(`${match.file_name} · row ${formatInt(match.row_index)} · ${match.column_name || `column ${match.column_index + 1}`}`, "neutral");
+        return;
+      }
+      await wait(JUMP_POLL_MS);
+      if (!isIndexing) {
+        statusBar.setMessage(`Row ${formatInt(match.row_index)} is beyond the end of the indexed file`, "warning");
+        return;
+      }
+    }
+  }
+
+  // ------------------------------------------------- jump, copy, detail
+  async function runJumpToRow(rowNumber: number): Promise<void> {
+    if (!session.path) return;
+    const max = session.scrollRowCount;
+    if (max === 0 || rowNumber < 1 || rowNumber > max) {
+      jumpToRow.setStatus(`Row must be between 1 and ${formatInt(max)}.`, "negative");
+      return;
+    }
+    try {
+      await virtualizer.scrollToCell(rowNumber - 1, virtualizer.getHighlightedCell()?.columnIndex ?? session.visibleColumnIndices()[0] ?? 0);
       jumpToRow.close();
     } catch (err) {
       jumpToRow.setStatus(formatError(err), "negative");
     }
   }
 
-  async function runFilterFlow(query: string): Promise<void> {
-    if (!session.path || isOpening) {
-      return;
-    }
-
-    const trimmed = query.trim();
-    const generation = ++filterGeneration;
-
-    if (trimmed.length === 0) {
-      await runClearFilter();
-      return;
-    }
-
-    filterBar.setBusy(true);
-    filterBar.setStatus("Scanning…");
-    shell.status.setText(`Filtering rows containing “${trimmed}”…`, "busy");
-
+  async function copyText(text: string, title: string): Promise<void> {
     try {
-      await csvApi.startCsvFilter(trimmed);
+      await navigator.clipboard.writeText(text);
+      toasts.show({ title, tone: "positive", duration: 1800 });
     } catch (err) {
-      if (generation === filterGeneration) {
-        filterBar.setBusy(false);
-        const message = formatError(err);
-        filterBar.setStatus(message, "negative");
-        shell.status.setText(`Filter error: ${message}`, "negative");
-      }
-      return;
+      toasts.show({ title: "Copy failed", detail: formatError(err), tone: "negative" });
     }
-
-    await pollFilterStatus(generation, trimmed);
   }
 
-  async function runClearFilter(): Promise<void> {
-    if (!session.path) {
+  async function copyHighlighted(scope: "cell" | "row"): Promise<void> {
+    const sel = virtualizer.getHighlightedCell();
+    if (!sel) {
+      toasts.show({ title: "Select a cell first", tone: "neutral", duration: 2000 });
       return;
     }
-    const generation = ++filterGeneration;
-
+    const visible = session.visibleColumnIndices();
+    if (visible.length === 0) return;
+    const colStart = scope === "cell" ? sel.columnIndex : visible[0];
+    const colEnd = scope === "cell" ? sel.columnIndex : visible[visible.length - 1];
     try {
-      await csvApi.clearCsvFilter();
+      const batch = await csvApi.fetchCsvRows(sel.rowIndex, 1, colStart, colEnd - colStart + 1);
+      const row = batch.rows[0];
+      if (!row) return;
+      const text = scope === "cell" ? row[0] ?? "" : visible.map((c) => row[c - colStart] ?? "").join("\t");
+      await copyText(text, scope === "cell" ? "Copied cell" : `Copied row ${formatInt(sel.rowIndex + 1)}`);
     } catch (err) {
-      if (generation === filterGeneration) {
-        const message = formatError(err);
-        filterBar.setStatus(message, "negative");
-        shell.status.setText(`Clear filter error: ${message}`, "negative");
-      }
-      return;
-    }
-
-    if (generation !== filterGeneration) {
-      return;
-    }
-    session.applyActiveFilter(null);
-    filterBar.setActiveQuery(null);
-    filterBar.setBusy(false);
-    filterBar.setStatus("");
-    virtualizer.resetRowsForVisibilityChange();
-    virtualizer.updateAria();
-    shell.status.setText("Filter cleared.", "neutral");
-  }
-
-  async function pollFilterStatus(generation: number, query: string): Promise<void> {
-    while (generation === filterGeneration) {
-      let status: FilterStatus;
-      try {
-        status = await csvApi.getCsvFilterStatus();
-      } catch (err) {
-        if (generation === filterGeneration) {
-          const message = formatError(err);
-          filterBar.setBusy(false);
-          filterBar.setStatus(message, "negative");
-          shell.status.setText(`Filter status error: ${message}`, "negative");
-        }
-        return;
-      }
-
-      if (generation !== filterGeneration) {
-        return;
-      }
-
-      if (status.error) {
-        filterBar.setBusy(false);
-        filterBar.setStatus(status.error, "negative");
-        shell.status.setText(`Filter error: ${status.error}`, "negative");
-        return;
-      }
-
-      if (status.is_ready && !status.is_filtering) {
-        const matched = status.matched_rows;
-        const total = status.total_rows;
-        session.applyActiveFilter({ query, matchedRows: matched });
-        filterBar.setActiveQuery(query);
-        filterBar.setBusy(false);
-        filterBar.setStatus(formatFilterMatches(matched, total));
-        virtualizer.resetRowsForVisibilityChange();
-        virtualizer.updateAria();
-        shell.status.setText(
-          `Filter applied · ${matched.toLocaleString()} of ${total.toLocaleString()} rows match.`,
-          matched === 0 ? "neutral" : "positive",
-        );
-        return;
-      }
-
-      if (!status.is_filtering && !status.is_ready) {
-        // Cancelled or never started.
-        filterBar.setBusy(false);
-        filterBar.setStatus("");
-        return;
-      }
-
-      filterBar.setStatus(formatFilterProgress(status));
-      shell.status.setText(formatFilterProgress(status), "busy");
-      await wait(FILTER_PROGRESS_POLL_INTERVAL_MS);
+      toasts.show({ title: "Copy failed", detail: formatError(err), tone: "negative" });
     }
   }
 
-  function formatFilterProgress(status: FilterStatus): string {
-    const scanned = status.rows_scanned.toLocaleString();
-    const matched = status.matched_rows.toLocaleString();
-    if (status.total_rows > 0) {
-      const total = status.total_rows.toLocaleString();
-      return `Scanning ${scanned} of ${total} rows · ${matched} match${
-        status.matched_rows === 1 ? "" : "es"
-      }…`;
-    }
-    return `Scanning ${scanned} rows · ${matched} match${
-      status.matched_rows === 1 ? "" : "es"
-    }…`;
-  }
-
-  function formatFilterMatches(matched: number, total: number): string {
-    return `${matched.toLocaleString()} of ${total.toLocaleString()} rows match`;
-  }
-
-  async function runSortFlow(columnIndex: number, addToCurrent: boolean): Promise<void> {
-    if (!session.path || isOpening) {
-      return;
-    }
-
-    if (columnIndex < 0 || columnIndex >= session.headers.length) {
-      return;
-    }
-
-    const generation = ++sortGeneration;
-    const nextKeys = nextSortKeys(session.activeSort, columnIndex, addToCurrent);
-
-    if (nextKeys.length === 0) {
-      try {
-        await csvApi.clearCsvSort();
-        if (generation !== sortGeneration) {
-          return;
-        }
-        session.activeSort = [];
-        virtualizer.setPendingSortColumn(null);
-        virtualizer.resetRowsForVisibilityChange();
-        shell.status.setText("Sort cleared.", "neutral");
-      } catch (err) {
-        if (generation === sortGeneration) {
-          console.error(err);
-          shell.status.setText(`Clear sort error: ${formatError(err)}`, "negative");
-        }
-      }
-      return;
-    }
-
-    const summary = describeSortKeys(nextKeys, session.headers);
-    // The pending indicator only marks the column the user just clicked, even
-    // when the sort is multi-key — the others retain their existing arrows.
-    virtualizer.setPendingSortColumn(columnIndex);
-    shell.status.setText(`Sorting ${summary}…`, "busy");
-
+  async function openCellDetail(cell: HighlightedCell | null = virtualizer.getHighlightedCell()): Promise<void> {
+    if (!cell || !session.path) return;
     try {
-      await csvApi.startCsvSort(nextKeys);
-    } catch (err) {
-      if (generation === sortGeneration) {
-        virtualizer.setPendingSortColumn(null);
-        console.error(err);
-        shell.status.setText(`Sort error: ${formatError(err)}`, "negative");
-      }
-      return;
-    }
-
-    await pollSortStatus(generation, nextKeys);
-  }
-
-  async function pollSortStatus(
-    generation: number,
-    keys: SortKey[],
-  ): Promise<void> {
-    const summary = describeSortKeys(keys, session.headers);
-    while (generation === sortGeneration) {
-      let status: SortStatus;
-      try {
-        status = await csvApi.getCsvSortStatus();
-      } catch (err) {
-        if (generation === sortGeneration) {
-          console.error(err);
-          shell.status.setText(`Sort status error: ${formatError(err)}`, "negative");
-          virtualizer.setPendingSortColumn(null);
-        }
-        return;
-      }
-
-      if (generation !== sortGeneration) {
-        return;
-      }
-
-      if (status.error) {
-        virtualizer.setPendingSortColumn(null);
-        shell.status.setText(`Sort error: ${status.error}`, "negative");
-        return;
-      }
-
-      if (status.is_ready && !status.is_sorting) {
-        session.activeSort = status.keys.length > 0 ? status.keys : keys;
-        virtualizer.setPendingSortColumn(null);
-        virtualizer.resetRowsForVisibilityChange();
-        shell.status.setText(
-          `Sorted ${summary} · ${status.total_rows.toLocaleString()} rows.`,
-          "positive",
-        );
-        return;
-      }
-
-      if (!status.is_sorting && !status.is_ready) {
-        // Sort was cleared or never started. Drop the pending indicator.
-        virtualizer.setPendingSortColumn(null);
-        return;
-      }
-
-      shell.status.setText(formatSortProgress(status, summary), "busy");
-      await wait(SORT_PROGRESS_POLL_INTERVAL_MS);
-    }
-  }
-
-  /**
-   * Compute the next sort key list given the current active keys, the clicked
-   * column, and whether shift was held.
-   *
-   * - Plain click: replaces the entire sort with that column. If the column is
-   *   already the sole primary key, cycles asc → desc → cleared.
-   * - Shift+click: adds the column as a secondary key (or cycles its direction
-   *   if it's already in the list). Removing the only remaining key clears.
-   */
-  function nextSortKeys(
-    activeSort: ActiveSort,
-    columnIndex: number,
-    addToCurrent: boolean,
-  ): SortKey[] {
-    if (!addToCurrent) {
-      const isSoleKey =
-        activeSort.length === 1 && activeSort[0].column === columnIndex;
-      if (!isSoleKey) {
-        return [{ column: columnIndex, direction: "asc" }];
-      }
-      // Sole primary: cycle asc → desc → cleared.
-      if (activeSort[0].direction === "asc") {
-        return [{ column: columnIndex, direction: "desc" }];
-      }
-      return [];
-    }
-
-    // Shift+click: cycle direction or remove if already at end of cycle.
-    const existingIndex = activeSort.findIndex((k) => k.column === columnIndex);
-    if (existingIndex < 0) {
-      return [...activeSort, { column: columnIndex, direction: "asc" }];
-    }
-    const existing = activeSort[existingIndex];
-    const next = activeSort.slice();
-    if (existing.direction === "asc") {
-      next[existingIndex] = { column: columnIndex, direction: "desc" };
-      return next;
-    }
-    // Remove this key — its direction cycle has wrapped.
-    next.splice(existingIndex, 1);
-    return next;
-  }
-
-  function describeSortKeys(keys: SortKey[], headers: string[]): string {
-    if (keys.length === 0) {
-      return "no columns";
-    }
-    const parts = keys.map((key) => {
-      const name = headers[key.column] || `column ${key.column + 1}`;
-      return `${name} (${key.direction})`;
-    });
-    if (parts.length === 1) {
-      return `by ${parts[0]}`;
-    }
-    return `by ${parts.join(", then ")}`;
-  }
-
-  function formatSortProgress(status: SortStatus, summary: string): string {
-    const rows = status.rows_scanned.toLocaleString();
-    const total = status.total_rows > 0 ? status.total_rows.toLocaleString() : null;
-    if (total !== null) {
-      return `Sorting ${summary} · ${rows} of ${total} rows scanned…`;
-    }
-    return `Sorting ${summary} · ${rows} rows scanned…`;
-  }
-
-  async function runExportFlow(): Promise<void> {
-    if (!session.path || isOpening) {
-      return;
-    }
-
-    const defaultName = suggestExportFileName(session.path, session.activeFilter, session.activeSort);
-    let target: string | null;
-    try {
-      target = await save({
-        defaultPath: defaultName,
-        filters: [{ name: "CSV", extensions: ["csv"] }],
+      const batch = await csvApi.fetchCsvRows(cell.rowIndex, 1, cell.columnIndex, 1);
+      const value = batch.rows[0]?.[0] ?? "";
+      cellDetail.show({
+        column: session.headers[cell.columnIndex] ?? "",
+        columnIndex: cell.columnIndex,
+        rowNumber: cell.rowIndex + 1,
+        value,
       });
     } catch (err) {
-      shell.status.setText(`Export dialog error: ${formatError(err)}`, "negative");
-      return;
-    }
-    if (!target) {
-      return;
-    }
-
-    const generation = ++exportGeneration;
-    exportButton.setBusy(true);
-    shell.status.setText("Preparing export…", "busy");
-
-    // Always pass the explicit column subset (in display order) so hidden
-    // columns are dropped at export time. The backend treats `null` as
-    // "all columns", but we'd rather always be explicit from the UI side.
-    const columnIndices = session.visibleColumnIndices();
-
-    let initial: ExportStatus;
-    try {
-      initial = await csvApi.startCsvExport(target, columnIndices);
-    } catch (err) {
-      if (generation === exportGeneration) {
-        exportButton.setBusy(false);
-        shell.status.setText(`Export error: ${formatError(err)}`, "negative");
-      }
-      return;
-    }
-
-    if (generation !== exportGeneration) {
-      return;
-    }
-
-    if (initial.error) {
-      exportButton.setBusy(false);
-      shell.status.setText(`Export error: ${initial.error}`, "negative");
-      return;
-    }
-
-    shell.status.setText(formatExportProgress(initial), "busy");
-    await pollExportStatus(generation, target);
-  }
-
-  async function pollExportStatus(generation: number, target: string): Promise<void> {
-    while (generation === exportGeneration) {
-      await wait(EXPORT_PROGRESS_POLL_INTERVAL_MS);
-
-      let status: ExportStatus;
-      try {
-        status = await csvApi.getCsvExportStatus();
-      } catch (err) {
-        if (generation === exportGeneration) {
-          exportButton.setBusy(false);
-          shell.status.setText(`Export status error: ${formatError(err)}`, "negative");
-        }
-        return;
-      }
-
-      if (generation !== exportGeneration) {
-        return;
-      }
-
-      if (status.error) {
-        exportButton.setBusy(false);
-        shell.status.setText(`Export error: ${status.error}`, "negative");
-        return;
-      }
-
-      if (status.is_complete && !status.is_running) {
-        exportButton.setBusy(false);
-        const rows = status.rows_written.toLocaleString();
-        shell.status.setText(`Exported ${rows} rows to ${target}.`, "positive");
-        return;
-      }
-
-      if (!status.is_running && !status.is_complete) {
-        // Cancelled or never started.
-        exportButton.setBusy(false);
-        shell.status.setText("Export cancelled.", "neutral");
-        return;
-      }
-
-      shell.status.setText(formatExportProgress(status), "busy");
+      toasts.show({ title: "Couldn't read that cell", detail: formatError(err), tone: "negative" });
     }
   }
 
-  function formatExportProgress(status: ExportStatus): string {
-    const written = status.rows_written.toLocaleString();
-    if (status.total_rows > 0) {
-      const total = status.total_rows.toLocaleString();
-      const pct = Math.min(100, Math.floor((status.rows_written / status.total_rows) * 100));
-      return `Exporting · ${written} of ${total} rows (${pct}%)…`;
+  // -------------------------------------------------------- column menu
+  function openColumnMenu(columnIndex: number, anchor: HTMLElement): void {
+    closeColumnMenu();
+    const header = session.headers[columnIndex] || `Column ${columnIndex + 1}`;
+    const menu = document.createElement("div");
+    menu.className = "cr-menu";
+    menu.setAttribute("role", "menu");
+
+    const items: Array<{ label: string; run: () => void; disabled?: boolean }> = [
+      { label: "Sort ascending", run: () => void setSortDirection(columnIndex, "asc"), disabled: isIndexing },
+      { label: "Sort descending", run: () => void setSortDirection(columnIndex, "desc"), disabled: isIndexing },
+      { label: "Clear sort", run: () => void applySortKeys(++sortGeneration, [], columnIndex), disabled: session.activeSort.length === 0 },
+      { label: "Filter empty cells", run: () => void applyFilter(appendTerm(`${quoteColumn(header)}=""`)) },
+      { label: "Auto-fit width", run: () => virtualizer.autoFitColumn(columnIndex) },
+      { label: "Hide column", run: () => hideColumn(columnIndex), disabled: session.visibleColumnIndices().length <= 1 },
+      { label: "Copy column name", run: () => void copyText(header, "Copied column name") },
+    ];
+    for (const item of items) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "cr-menu-item";
+      button.setAttribute("role", "menuitem");
+      button.textContent = item.label;
+      button.disabled = Boolean(item.disabled);
+      button.addEventListener("click", () => {
+        closeColumnMenu();
+        item.run();
+      });
+      menu.append(button);
     }
-    return `Exporting · ${written} rows…`;
+
+    const rect = anchor.getBoundingClientRect();
+    menu.style.top = `${rect.bottom + 4}px`;
+    menu.style.left = `${Math.min(rect.left, window.innerWidth - 220)}px`;
+    document.body.append(menu);
+    columnMenuEl = menu;
+    window.setTimeout(() => document.addEventListener("pointerdown", handleMenuOutside, { capture: true, once: true }), 0);
   }
 
-  function suggestExportFileName(
-    sourcePath: string,
-    filter: { query: string } | null,
-    sort: ActiveSort,
-  ): string {
-    const sep = sourcePath.includes("\\") ? "\\" : "/";
-    const base = sourcePath.split(sep).pop() ?? "export.csv";
-    const dot = base.lastIndexOf(".");
-    const stem = dot > 0 ? base.slice(0, dot) : base;
-    const tags: string[] = [];
-    if (filter) tags.push("filtered");
-    if (sort.length === 1) {
-      tags.push(`sorted-${sort[0].direction}`);
-    } else if (sort.length > 1) {
-      tags.push("sorted");
-    }
-    const suffix = tags.length > 0 ? `-${tags.join("-")}` : "-export";
-    return `${stem}${suffix}.csv`;
-  }
-
-  async function runReopenAs(delimiter: string, encoding: string): Promise<void> {
-    if (!session.path || isOpening) {
+  function handleMenuOutside(event: PointerEvent): void {
+    if (columnMenuEl && event.target instanceof Node && columnMenuEl.contains(event.target)) {
+      document.addEventListener("pointerdown", handleMenuOutside, { capture: true, once: true });
       return;
     }
+    closeColumnMenu();
+  }
 
-    resultJumpGeneration++;
-    sortGeneration++;
-    filterGeneration++;
-    exportGeneration++;
-    virtualizer.setPendingSortColumn(null);
-    isOpening = true;
-    try {
-      await openCsvFromPath(
-        session.path,
-        shell.status,
-        session,
-        virtualizer,
-        {
-          onDatasetOpened: revealDataset,
-          onProgress: (ratio) => shell.progress.setProgress(ratio),
+  function closeColumnMenu(): void {
+    columnMenuEl?.remove();
+    columnMenuEl = null;
+  }
+
+  function hideColumn(columnIndex: number): void {
+    const next = new Set(session.hiddenColumns);
+    next.add(columnIndex);
+    session.hiddenColumns = next;
+    columnVisibilityControl.setColumns(session.headers, next);
+    virtualizer.scheduleRefresh();
+    toasts.show({
+      title: `Hid ${session.headers[columnIndex] || `column ${columnIndex + 1}`}`,
+      tone: "neutral",
+      duration: 4000,
+      action: {
+        label: "Undo",
+        onClick: () => {
+          const restored = new Set(session.hiddenColumns);
+          restored.delete(columnIndex);
+          session.hiddenColumns = restored;
+          columnVisibilityControl.setColumns(session.headers, restored);
+          virtualizer.scheduleRefresh();
         },
-        { delimiterOverride: delimiter, encodingOverride: encoding },
-      );
-    } finally {
-      isOpening = false;
-    }
-  }
-
-  function syncReopenAsControl(): void {
-    if (!session.path || !session.profile) {
-      reopenAsControl.setEnabled(false);
-      return;
-    }
-
-    const delimiterChar =
-      typeof session.profile.delimiter === "number"
-        ? String.fromCharCode(session.profile.delimiter)
-        : null;
-    reopenAsControl.setDefaults({
-      delimiterChar,
-      encoding: session.profile.encoding,
+      },
     });
-    reopenAsControl.setEnabled(true);
   }
 
-  function revealDataset(): void {
-    searchResults.root.classList.add("hidden");
+  // ---------------------------------------------------------- commands
+  function buildCommands(): Command[] {
+    const hasFile = session.path !== null;
+    return [
+      { id: "open", label: "Open file…", shortcut: "Ctrl O", run: () => void runOpenDialog() },
+      { id: "filter", label: "Filter rows", hint: "process:powershell -user:svc /regex/", shortcut: "Ctrl F", enabled: hasFile, run: () => { queryBar.setMode("file"); syncModeView("file"); queryBar.focus(); } },
+      { id: "search", label: "Search across files", shortcut: "Ctrl Shift F", run: () => { queryBar.setMode("files"); syncModeView("files"); queryBar.focus(); } },
+      { id: "files", label: "Choose files to search…", run: () => void pickSearchFiles() },
+      { id: "recent-search", label: "Restore last search file set", enabled: getRecentSearchPaths().length > 0, run: () => void applySearchFiles(getRecentSearchPaths(), false) },
+      { id: "jump", label: "Go to row…", shortcut: "Ctrl G", enabled: hasFile, run: () => { jumpToRow.setMaxRow(session.scrollRowCount); jumpToRow.open(); } },
+      { id: "detail", label: "Show cell detail", shortcut: "Enter", enabled: hasFile && virtualizer.getHighlightedCell() !== null, run: () => void openCellDetail() },
+      { id: "copy-cell", label: "Copy selected cell", shortcut: "Ctrl C", enabled: hasFile, run: () => void copyHighlighted("cell") },
+      { id: "copy-row", label: "Copy selected row", shortcut: "Ctrl Shift C", enabled: hasFile, run: () => void copyHighlighted("row") },
+      { id: "clear-filter", label: "Clear filter", shortcut: "Esc", enabled: session.activeFilter !== null, run: () => void clearFilter() },
+      { id: "clear-sort", label: "Clear sort", enabled: session.activeSort.length > 0, run: () => void applySortKeys(++sortGeneration, [], -1) },
+      { id: "columns", label: "Show or hide columns…", enabled: hasFile, run: () => columnVisibilityControl.open() },
+      { id: "autofit", label: "Auto-fit all columns", enabled: hasFile, run: () => void refitColumns() },
+      { id: "reopen", label: "Reopen with a different encoding or delimiter…", enabled: hasFile, run: () => reopenAsControl.toggle() },
+      { id: "export", label: "Export current view…", shortcut: "Ctrl E", enabled: hasFile, run: () => void runExport() },
+      { id: "theme", label: `Theme: ${getThemeMode()} → change`, run: () => { cycleThemeMode(); syncThemeButton(); } },
+      { id: "close", label: "Close file", enabled: hasFile, run: () => closeFile() },
+    ];
+  }
 
-    if (session.path) {
-      empty.root.classList.add("hidden");
-      grid.root.classList.remove("hidden");
-      shell.setSubtitleVisible(false);
-      syncReopenAsControl();
-      // Reset the filter bar to its empty state — opening a new file clears
-      // any prior filter on the backend, so the UI must mirror that.
-      filterBar.input.value = "";
-      filterBar.setBusy(false);
-      filterBar.setStatus("");
-      filterBar.setActiveQuery(null);
-      filterBar.setVisible(true);
-      exportButton.setBusy(false);
-      exportButton.setEnabled(true);
-      columnVisibilityControl.setColumns(session.headers, session.hiddenColumns);
-      columnVisibilityControl.setEnabled(true);
-      jumpToRow.close();
-      jumpToRow.setMaxRow(session.scrollRowCount);
-      return;
+  async function refitColumns(): Promise<void> {
+    if (!session.path) return;
+    try {
+      const sample = await csvApi.fetchCsvRows(0, Math.min(64, session.rowCount), 0, session.headers.length);
+      virtualizer.autoFitColumns(sample.rows);
+    } catch {
+      /* ignore */
     }
-
-    grid.root.classList.add("hidden");
-    empty.root.classList.remove("hidden");
-    shell.setSubtitleVisible(true);
-    reopenAsControl.setEnabled(false);
-    filterBar.setVisible(false);
-    exportButton.setEnabled(false);
-    columnVisibilityControl.setEnabled(false);
-    jumpToRow.close();
   }
 
-  function revealSearchResults(): void {
-    empty.root.classList.add("hidden");
-    grid.root.classList.add("hidden");
-    searchResults.root.classList.remove("hidden");
-    filterBar.setVisible(false);
-    exportButton.setEnabled(false);
-    columnVisibilityControl.setEnabled(false);
-    jumpToRow.close();
-  }
-
-  async function runOpenFlow(): Promise<void> {
-    if (isOpening) {
-      return;
-    }
-
-    resultJumpGeneration++;
+  function closeFile(): void {
+    openGeneration++;
+    indexGeneration++;
     sortGeneration++;
     filterGeneration++;
     exportGeneration++;
-    virtualizer.setPendingSortColumn(null);
-    isOpening = true;
-    try {
-      await openCsvFromDialog(shell.status, session, virtualizer, {
-        onDatasetOpened: revealDataset,
-        onProgress: (ratio) => shell.progress.setProgress(ratio),
-      });
-    } finally {
-      isOpening = false;
-    }
+    session.path = null;
+    session.profile = null;
+    session.headers = [];
+    session.rowCount = 0;
+    session.scrollRowCount = 0;
+    session.activeFilter = null;
+    session.activeSort = [];
+    isIndexing = false;
+    virtualizer.reset();
+    cellDetail.hide();
+    columnVisibilityControl.setColumns([], new Set());
+    queryBar.setChips([]);
+    queryBar.setCount(null, null);
+    queryBar.setValue("");
+    syncFileChip();
+    syncAvailability();
+    showFileView();
+    statusBar.setActivity(null);
+    statusBar.setMessage("Ready", "neutral");
   }
 
-  async function openStartupCsvIfConfigured(): Promise<void> {
-    try {
-      const path = await csvApi.getStartupCsvPath();
-      if (!path || isOpening) {
-        return;
-      }
+  // --------------------------------------------------------- grid events
+  grid.headerViewport.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    if (target.closest(".cr-col-resize, .cr-col-menu")) return;
+    const cell = target.closest<HTMLElement>("[data-column-index]");
+    if (!cell) return;
+    const columnIndex = Number.parseInt(cell.dataset.columnIndex ?? "", 10);
+    if (Number.isNaN(columnIndex)) return;
+    void runSort(columnIndex, event.shiftKey);
+  });
 
-      sortGeneration++;
-      filterGeneration++;
-      exportGeneration++;
-      virtualizer.setPendingSortColumn(null);
-      isOpening = true;
-      try {
-        await openCsvFromPath(path, shell.status, session, virtualizer, {
-          onDatasetOpened: revealDataset,
-          onProgress: (ratio) => shell.progress.setProgress(ratio),
-        });
-      } finally {
-        isOpening = false;
-      }
-    } catch (err) {
-      console.error(err);
-      shell.status.setText(`Startup error: ${String(err)}`, "negative");
+  grid.scrollRegion.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const cell = target.closest<HTMLElement>("[data-column-index]");
+    const row = target.closest<HTMLElement>("[data-row-index]");
+    if (!cell || !row || row.dataset.skeleton === "true") return;
+    const columnIndex = Number.parseInt(cell.dataset.columnIndex ?? "", 10);
+    const rowIndex = Number.parseInt(row.dataset.rowIndex ?? "", 10);
+    if (Number.isNaN(columnIndex) || Number.isNaN(rowIndex)) return;
+    virtualizer.setHighlightedCell({ rowIndex, columnIndex });
+    if (cellDetail.isOpen()) void openCellDetail({ rowIndex, columnIndex });
+  });
+
+  grid.scrollRegion.addEventListener("dblclick", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const cell = target.closest<HTMLElement>("[data-column-index]");
+    const row = target.closest<HTMLElement>("[data-row-index]");
+    if (!cell || !row || row.dataset.skeleton === "true") return;
+    const columnIndex = Number.parseInt(cell.dataset.columnIndex ?? "", 10);
+    const rowIndex = Number.parseInt(row.dataset.rowIndex ?? "", 10);
+    if (Number.isNaN(columnIndex) || Number.isNaN(rowIndex)) return;
+    void openCellDetail({ rowIndex, columnIndex });
+  });
+
+  grid.scrollRegion.addEventListener("keydown", (event) => {
+    if (!session.path) return;
+    const handled = (): void => {
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    switch (event.key) {
+      case "ArrowDown":
+        virtualizer.moveHighlight(1, 0);
+        handled();
+        break;
+      case "ArrowUp":
+        virtualizer.moveHighlight(-1, 0);
+        handled();
+        break;
+      case "ArrowLeft":
+        virtualizer.moveHighlight(0, -1);
+        handled();
+        break;
+      case "ArrowRight":
+        virtualizer.moveHighlight(0, 1);
+        handled();
+        break;
+      case "PageDown":
+        virtualizer.moveHighlight(1, 0, { page: true });
+        handled();
+        break;
+      case "PageUp":
+        virtualizer.moveHighlight(-1, 0, { page: true });
+        handled();
+        break;
+      case "Home":
+        virtualizer.moveHighlightToEdge(event.ctrlKey ? "top" : "start");
+        handled();
+        break;
+      case "End":
+        virtualizer.moveHighlightToEdge(event.ctrlKey ? "bottom" : "end");
+        handled();
+        break;
+      case "Enter":
+        void openCellDetail();
+        handled();
+        break;
+      case "Escape":
+        if (cellDetail.isOpen()) cellDetail.hide();
+        else virtualizer.setHighlightedCell(null);
+        handled();
+        break;
     }
-  }
+  });
 
-  async function pickSearchFiles(): Promise<void> {
-    try {
-      const paths = await pickCsvSearchPaths();
-      if (paths === null) {
-        return;
-      }
+  // --------------------------------------------------- global shortcuts
+  window.addEventListener("keydown", (event) => {
+    const key = event.key.toLowerCase();
+    const mod = event.ctrlKey || event.metaKey;
+    const target = event.target;
+    const inEditable =
+      target instanceof HTMLElement &&
+      (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable);
 
-      await applySearchFiles(paths, { persist: true });
-    } catch (err) {
-      console.error(err);
-      searchPanel.setMessage(`File selection error: ${String(err)}`);
-    }
-  }
-
-  async function restoreRecentSearchSet(): Promise<void> {
-    const paths = getRecentSearchPaths();
-    if (paths.length === 0) {
-      searchPanel.setMessage("No recent search files saved.");
-      searchPanel.setRecentSearchSetAvailable(false);
+    if (mod && key === "k") {
+      event.preventDefault();
+      palette.toggle();
       return;
     }
-
-    try {
-      await applySearchFiles(paths, { persist: false });
-    } catch (err) {
-      console.error(err);
-      searchPanel.setMessage(`Recent file restore error: ${formatError(err)}`);
-    }
-  }
-
-  async function applySearchFiles(
-    paths: string[],
-    options: { persist: boolean },
-  ): Promise<void> {
-    searchPanel.setMessage("Profiling selected files...");
-    const profiles = await csvApi.profileCsvFiles(paths);
-    searchPaths = paths;
-    searchPanel.setSelectedFiles(paths, profiles);
-    searchPanel.setMessage(formatProfileIssues(profiles));
-
-    if (options.persist) {
-      storeRecentSearchPaths(paths);
-      searchPanel.setRecentSearchSetAvailable(paths.length > 0);
-    }
-  }
-
-  async function runSearch(query: string, limit: number): Promise<void> {
-    const generation = ++searchGeneration;
-    const trimmed = query.trim();
-
-    if (trimmed.length === 0) {
-      searchPanel.setMessage("Enter search text.");
+    if (palette.isOpen()) return;
+    if (mod && key === "o") {
+      event.preventDefault();
+      void runOpenDialog();
       return;
     }
-
-    if (searchPaths.length === 0) {
-      searchPanel.setMessage("Choose files to search.");
+    if (mod && key === "f") {
+      event.preventDefault();
+      const mode: QueryMode = event.shiftKey ? "files" : "file";
+      queryBar.setMode(mode);
+      syncModeView(mode);
+      queryBar.focus();
       return;
     }
-
-    storeSearchLimit(limit);
-    isSearchRunning = true;
-    isSearchCancelling = false;
-    searchResults.clear();
-    searchPanel.setBusy(true);
-    searchPanel.setMessage("Searching...");
-    void pollSearchProgress(generation);
-
-    try {
-      const summary = await csvApi.searchCsvFiles(searchPaths, trimmed, limit);
-      if (generation !== searchGeneration) {
-        return;
-      }
-
-      searchPanel.setMessage("");
-      searchResults.setActiveMatch(null);
-      searchResults.renderSummary(summary);
-      revealSearchResults();
-      shell.status.setText(
-        summary.cancelled
-          ? `Search cancelled: ${summary.matches.length.toLocaleString()} matches kept.`
-          : `Search complete: ${summary.matches.length.toLocaleString()} matches across ${summary.matched_files.toLocaleString()} files.`,
-        summary.errors.length > 0 ? "negative" : summary.cancelled ? "neutral" : "positive",
-      );
-    } catch (err) {
-      if (generation !== searchGeneration) {
-        return;
-      }
-
-      console.error(err);
-      searchPanel.setMessage(`Search error: ${String(err)}`);
-      shell.status.setText(`Search error: ${String(err)}`, "negative");
-    } finally {
-      if (generation === searchGeneration) {
-        isSearchRunning = false;
-        isSearchCancelling = false;
-        searchPanel.setBusy(false);
-      }
-    }
-  }
-
-  async function cancelSearch(): Promise<void> {
-    if (!isSearchRunning || isSearchCancelling) {
+    if (mod && key === "g" && session.path) {
+      event.preventDefault();
+      jumpToRow.setMaxRow(session.scrollRowCount);
+      if (jumpToRow.isOpen()) jumpToRow.close();
+      else jumpToRow.open();
       return;
     }
-
-    isSearchCancelling = true;
-    searchPanel.setMessage("Cancelling search...");
-
-    try {
-      const progress = await csvApi.cancelCsvSearch();
-      searchPanel.setMessage(formatSearchProgress(progress));
-    } catch (err) {
-      console.error(err);
-      searchPanel.setMessage(`Cancel error: ${formatError(err)}`);
-    }
-  }
-
-  async function pollSearchProgress(generation: number): Promise<void> {
-    while (generation === searchGeneration) {
-      await wait(SEARCH_PROGRESS_POLL_INTERVAL_MS);
-
-      if (generation !== searchGeneration || !isSearchRunning) {
-        return;
-      }
-
-      try {
-        const progress = await csvApi.getCsvSearchProgress();
-        if (generation !== searchGeneration || !isSearchRunning) {
-          return;
-        }
-
-        const message = formatSearchProgress(progress);
-        if (message.length > 0) {
-          searchPanel.setMessage(message);
-        }
-
-        if (!progress.is_running) {
-          return;
-        }
-      } catch (err) {
-        if (generation === searchGeneration && isSearchRunning) {
-          console.error(err);
-        }
-        return;
-      }
-    }
-  }
-
-  async function openSearchResult(match: CsvSearchMatch): Promise<void> {
-    if (isOpening) {
+    if (mod && key === "e" && session.path) {
+      event.preventDefault();
+      void runExport();
       return;
     }
-
-    const generation = ++resultJumpGeneration;
-    const targetRowIndex = Math.max(0, match.row_index - 1);
-    searchResults.setActiveMatch(match);
-
-    try {
-      if (session.path !== match.path) {
-        sortGeneration++;
-        filterGeneration++;
-        exportGeneration++;
-        virtualizer.setPendingSortColumn(null);
-        isOpening = true;
-        shell.status.setText(
-          `Opening ${match.file_name} at row ${match.row_index.toLocaleString()}…`,
-          "busy",
-        );
-
-        try {
-          await openCsvFromPath(match.path, shell.status, session, virtualizer, {
-            onDatasetOpened: revealDataset,
-            onProgress: (ratio) => shell.progress.setProgress(ratio),
-          });
-        } finally {
-          isOpening = false;
-        }
-      }
-
-      if (generation !== resultJumpGeneration || session.path !== match.path) {
+    if (mod && key === "c" && session.path && !inEditable) {
+      const selection = window.getSelection();
+      if (selection && selection.toString().length > 0) return;
+      if (virtualizer.getHighlightedCell() === null) return;
+      event.preventDefault();
+      void copyHighlighted(event.shiftKey ? "row" : "cell");
+      return;
+    }
+    if (event.key === "Escape" && !inEditable) {
+      closeColumnMenu();
+      if (cellDetail.isOpen()) {
+        cellDetail.hide();
         return;
       }
-
-      await jumpToSearchMatch(match, targetRowIndex, generation);
-    } catch (err) {
-      if (generation === resultJumpGeneration) {
-        console.error(err);
-        shell.status.setText(`Open result error: ${formatError(err)}`, "negative");
-      }
-    } finally {
-      if (generation === resultJumpGeneration && isOpening) {
-        isOpening = false;
+      if (isSearchRunning) {
+        void cancelCurrent();
       }
     }
-  }
+  });
 
-  async function jumpToSearchMatch(
-    match: CsvSearchMatch,
-    targetRowIndex: number,
-    generation: number,
-  ): Promise<void> {
-    while (generation === resultJumpGeneration) {
-      if (session.path !== match.path) {
-        return;
-      }
-
-      if (targetRowIndex < session.rowCount) {
-        await virtualizer.scrollToCell(targetRowIndex, match.column_index);
-        shell.status.setText(
-          `Opened ${match.file_name} · row ${match.row_index.toLocaleString()} · ${
-            match.column_name || `column ${match.column_index + 1}`
-          }`,
-          "positive",
-        );
-        return;
-      }
-
-      shell.status.setText(
-        `Indexing ${match.file_name} to row ${match.row_index.toLocaleString()}…`,
-        "busy",
-      );
-
-      await wait(JUMP_POLL_INTERVAL_MS);
-
-      if (generation !== resultJumpGeneration) {
-        return;
-      }
-
-      const status = await csvApi.getCsvIndexStatus();
-      if (generation !== resultJumpGeneration || status.path !== match.path) {
-        return;
-      }
-
-      session.applyIndexStatus(status);
-      virtualizer.updateAria();
-      virtualizer.scheduleRefresh();
-
-      if ((status.is_complete || status.error) && targetRowIndex >= session.rowCount) {
-        shell.status.setText(
-          `${match.file_name} finished indexing before row ${match.row_index.toLocaleString()} was available.`,
-          status.error ? "negative" : "neutral",
-        );
-        return;
-      }
-    }
+  if (import.meta.env.DEV) {
+    // Test hooks for driving the app over the DevTools protocol in development.
+    (window as unknown as { __clearRows: unknown }).__clearRows = {
+      openPath,
+      applyFilter,
+      clearFilter,
+      applySearchFiles,
+      runSearch,
+      runExportTo: (target: string) => runExport(target),
+      closeFile,
+      openCellDetail,
+      session,
+    };
   }
 
   function wait(ms: number): Promise<void> {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
 
-  function formatSearchProgress(progress: CsvSearchProgress): string {
-    const matches = `${progress.matches.toLocaleString()} match${
-      progress.matches === 1 ? "" : "es"
-    }`;
-
-    if (progress.cancelled) {
-      return `Search cancelled · ${matches}`;
-    }
-
-    if (!progress.is_running) {
-      return "";
-    }
-
-    const fileIndex =
-      progress.current_file_index > 0 ? progress.current_file_index : progress.completed_files + 1;
-    const filePart =
-      progress.total_files > 0
-        ? `File ${fileIndex.toLocaleString()} of ${progress.total_files.toLocaleString()}`
-        : "Searching";
-    const fileName = progress.current_file ? ` · ${progress.current_file}` : "";
-    const rowPart =
-      progress.current_row > 0 ? ` · row ${progress.current_row.toLocaleString()}` : "";
-    const errorPart =
-      progress.errors > 0
-        ? ` · ${progress.errors.toLocaleString()} file error${progress.errors === 1 ? "" : "s"}`
-        : "";
-
-    return `${filePart}${fileName}${rowPart} · ${matches}${errorPart}`;
-  }
-
-  function formatProfileIssues(profiles: CsvFileProfileResult[]): string {
-    const errors = profiles.filter((result) => result.error !== null);
-    const binaryLike = profiles.filter((result) => result.profile?.binary_like);
-    const warnings = profiles.flatMap((result) => result.profile?.warnings ?? []);
-
-    if (errors.length === 0 && binaryLike.length === 0 && warnings.length === 0) {
-      return "";
-    }
-
-    if (binaryLike.length > 0) {
-      return `${binaryLike.length.toLocaleString()} file${
-        binaryLike.length === 1 ? "" : "s"
-      } look binary and will be skipped by search.`;
-    }
-
-    if (errors.length > 0) {
-      return `${errors.length.toLocaleString()} file${
-        errors.length === 1 ? "" : "s"
-      } could not be profiled.`;
-    }
-
-    return warnings[0] ?? "";
-  }
-
   function formatError(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
   }
 
-  shell = createAppShell({
-    title: "Clear Rows",
-    subtitle: "Large-file preview and search",
-    version: __APP_VERSION__,
-    footerTagline: "Local desktop",
-    headerExtras: [
-      reopenAsControl.root,
-      columnVisibilityControl.root,
-      exportButton.root,
-      createThemeToggle(),
-    ],
-    onOpenCsv: () => {
-      void runOpenFlow();
-    },
-  });
-
-  workspace.append(empty.root, filterBar.root, jumpToRow.root, grid.root, searchResults.root);
-  shell.gridHost.append(searchPanel.root, workspace);
-  virtualizer.bind();
-
-  grid.headerViewport.addEventListener("click", (event) => {
-    const target = event.target;
-    if (!(target instanceof HTMLElement)) {
-      return;
-    }
-    const cell = target.closest<HTMLElement>("[data-column-index]");
-    if (!cell) {
-      return;
-    }
-    const columnIndex = Number.parseInt(cell.dataset.columnIndex ?? "", 10);
-    if (Number.isNaN(columnIndex)) {
-      return;
-    }
-    void runSortFlow(columnIndex, event.shiftKey);
-  });
-
-  grid.scrollRegion.addEventListener("click", (event) => {
-    const target = event.target;
-    if (!(target instanceof HTMLElement)) {
-      return;
-    }
-    const cell = target.closest<HTMLElement>("[data-column-index]");
-    if (!cell) {
-      return;
-    }
-    const row = cell.closest<HTMLElement>("[data-row-index]");
-    if (!row) {
-      return;
-    }
-    const columnIndex = Number.parseInt(cell.dataset.columnIndex ?? "", 10);
-    const rowIndex = Number.parseInt(row.dataset.rowIndex ?? "", 10);
-    if (Number.isNaN(columnIndex) || Number.isNaN(rowIndex)) {
-      return;
-    }
-    virtualizer.setHighlightedCell({ rowIndex, columnIndex });
-  });
-
-  async function copyHighlighted(scope: "cell" | "row"): Promise<void> {
-    const sel = virtualizer.getHighlightedCell();
-    if (!sel) {
-      shell.status.setText("Select a cell first (click a cell, or use search/jump).", "negative");
-      return;
-    }
-
-    const visible = session.visibleColumnIndices();
-    if (visible.length === 0) {
-      return;
-    }
-
-    // fetchCsvRows takes a contiguous column span; fetch the smallest range
-    // that covers either the single highlighted column or all visible columns.
-    const colStart = scope === "cell" ? sel.columnIndex : visible[0];
-    const colEnd = scope === "cell" ? sel.columnIndex : visible[visible.length - 1];
-    const colCount = colEnd - colStart + 1;
-
-    try {
-      const batch = await csvApi.fetchCsvRows(sel.rowIndex, 1, colStart, colCount);
-      const row = batch.rows[0];
-      if (!row) {
-        shell.status.setText("Could not read row to copy.", "negative");
-        return;
-      }
-
-      const text =
-        scope === "cell"
-          ? row[0] ?? ""
-          : visible.map((c) => row[c - colStart] ?? "").join("\t");
-
-      await navigator.clipboard.writeText(text);
-
-      if (scope === "cell") {
-        shell.status.setText(
-          `Copied cell R${(sel.rowIndex + 1).toLocaleString()}C${sel.columnIndex + 1}.`,
-          "positive",
-        );
-      } else {
-        shell.status.setText(
-          `Copied row ${(sel.rowIndex + 1).toLocaleString()} (${visible.length} column${
-            visible.length === 1 ? "" : "s"
-          }).`,
-          "positive",
-        );
-      }
-    } catch (err) {
-      shell.status.setText(`Copy error: ${formatError(err)}`, "negative");
-    }
-  }
-
-  host.replaceChildren(shell.root);
-
-  if (hasDesktopRuntime) {
-    void openStartupCsvIfConfigured();
-    wireFileDrop();
-  }
-
-  window.addEventListener("keydown", (e: KeyboardEvent) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "o") {
-      e.preventDefault();
-      void runOpenFlow();
-      return;
-    }
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
-      // Only intercept Ctrl/Cmd-F when a CSV is open, otherwise let the
-      // browser-default in-page find apply (no-op in WebView2 either way).
-      if (session.path) {
-        e.preventDefault();
-        filterBar.focus();
-      }
-      return;
-    }
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "g") {
-      if (session.path) {
-        e.preventDefault();
-        jumpToRow.setMaxRow(session.scrollRowCount);
-        if (jumpToRow.isOpen()) {
-          jumpToRow.close();
-        } else {
-          jumpToRow.open();
-        }
-      }
-      return;
-    }
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c") {
-      // Don't intercept when the user has a real text selection — let the
-      // browser's native copy carry it. Also ignore inside form inputs.
-      const sel = window.getSelection();
-      const hasTextSelection = sel !== null && sel.toString().length > 0;
-      const target = e.target;
-      const inEditable =
-        target instanceof HTMLElement &&
-        (target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.isContentEditable);
-
-      if (!session.path || hasTextSelection || inEditable) {
-        return;
-      }
-
-      if (virtualizer.getHighlightedCell() === null) {
-        return;
-      }
-
-      e.preventDefault();
-      // Shift+Ctrl+C copies the entire row as TSV; plain Ctrl+C copies the cell.
-      void copyHighlighted(e.shiftKey ? "row" : "cell");
-    }
-  });
-
-  function wireFileDrop(): void {
-    void getCurrentWebview().onDragDropEvent((event) => {
-      const payload = event.payload;
-      if (payload.type === "over" || payload.type === "enter") {
-        empty.root.dataset.dragOver = "true";
-        return;
-      }
-
-      empty.root.removeAttribute("data-drag-over");
-
-      if (payload.type !== "drop" || isOpening) {
-        return;
-      }
-
-      const path = payload.paths.find((candidate) => candidate.length > 0);
-      if (!path) {
-        return;
-      }
-
-      resultJumpGeneration++;
-      sortGeneration++;
-      filterGeneration++;
-      exportGeneration++;
-      virtualizer.setPendingSortColumn(null);
-      isOpening = true;
-      (async () => {
-        try {
-          await openCsvFromPath(path, shell.status, session, virtualizer, {
-            onDatasetOpened: revealDataset,
-            onProgress: (ratio) => shell.progress.setProgress(ratio),
-          });
-        } finally {
-          isOpening = false;
-        }
-      })();
-    });
+  function isSoftWarning(warning: string): boolean {
+    return warning.startsWith("Extension is CSV but detected");
   }
 }

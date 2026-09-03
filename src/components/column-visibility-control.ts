@@ -8,6 +8,7 @@ export type ColumnVisibilityControl = {
   setEnabled(enabled: boolean): void;
   /** Sync the popover with the current dataset and hidden state. */
   setColumns(headers: string[], hidden: Set<number>): void;
+  open(): void;
 };
 
 export function createColumnVisibilityControl(
@@ -18,7 +19,7 @@ export function createColumnVisibilityControl(
 
   const button = document.createElement("button");
   button.type = "button";
-  button.className = "dp-button dp-button-secondary dp-colvis-trigger";
+  button.className = "cr-btn cr-btn-secondary dp-colvis-trigger";
   button.textContent = "Columns";
   button.title = "Show or hide individual columns";
   button.disabled = true;
@@ -26,7 +27,7 @@ export function createColumnVisibilityControl(
   button.setAttribute("aria-haspopup", "dialog");
 
   const panel = document.createElement("div");
-  panel.className = "dp-colvis-panel hidden";
+  panel.className = "cr-popover dp-colvis-panel hidden";
   panel.setAttribute("role", "dialog");
   panel.setAttribute("aria-label", "Column visibility");
 
@@ -183,6 +184,12 @@ export function createColumnVisibilityControl(
       currentHeaders = headers;
       currentHidden = new Set(hidden);
       renderList();
+      const hiddenCount = currentHidden.size;
+      button.replaceChildren(document.createTextNode("Columns"));
+      const badge = document.createElement("kbd");
+      badge.textContent = hiddenCount > 0 ? `${headers.length - hiddenCount}/${headers.length}` : String(headers.length);
+      button.append(badge);
     },
+    open,
   };
 }

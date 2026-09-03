@@ -14,10 +14,12 @@
       {
         "label": "main",
         "title": "Clear Rows",
-        "width": 1120,
-        "height": 720,
+        "width": 1280,
+        "height": 800,
         "resizable": true,
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,SmoothScrolling,WindowsScrollingPersonality --disable-smooth-scrolling --disable-threaded-scrolling"
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,SmoothScrolling,WindowsScrollingPersonality --disable-smooth-scrolling --disable-threaded-scrolling",
+        "minWidth": 880,
+        "minHeight": 560
       }
     ],
     "security": {
@@ -33,6 +35,26 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": [
+          "csv"
+        ],
+        "name": "CSV file",
+        "description": "Comma-separated values",
+        "role": "Viewer",
+        "mimeType": "text/csv"
+      },
+      {
+        "ext": [
+          "tsv"
+        ],
+        "name": "TSV file",
+        "description": "Tab-separated values",
+        "role": "Viewer",
+        "mimeType": "text/tab-separated-values"
+      }
     ]
   },
   "plugins": {}

@@ -76,6 +76,12 @@ impl Matcher {
                 if cell.is_empty() {
                     return needle.is_empty();
                 }
+                // Hot path: ASCII needle against any cell can be compared
+                // case-insensitively byte-for-byte without building a
+                // lowercase copy of the cell.
+                if needle.is_ascii() {
+                    return contains_ascii_ci(cell.as_bytes(), needle.as_bytes());
+                }
                 lowercase_into(cell, lower_buf);
                 lower_buf.contains(needle.as_str())
             }
@@ -86,6 +92,29 @@ impl Matcher {
             Matcher::Regex(regex) => regex.is_match(cell),
         }
     }
+}
+
+/// Case-insensitive ASCII substring search. Non-ASCII bytes in `haystack`
+/// never equal an ASCII needle byte, so this stays correct for UTF-8 cells.
+fn contains_ascii_ci(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    let first = needle[0].to_ascii_lowercase();
+    let last_start = haystack.len() - needle.len();
+    let mut i = 0;
+    while i <= last_start {
+        if haystack[i].to_ascii_lowercase() == first
+            && haystack[i..i + needle.len()].eq_ignore_ascii_case(needle)
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 fn lowercase_into(source: &str, buf: &mut String) {
