@@ -20,7 +20,9 @@
 //! dashes and underscores are treated as equivalent so `command_line`,
 //! `command-line` and `Command Line` all hit the same column.
 
-use regex::{Regex, RegexBuilder};
+use regex::bytes::{Regex, RegexBuilder};
+
+use crate::csv::scan::{field_bytes, Field};
 
 #[derive(Debug)]
 pub enum Matcher {
@@ -50,8 +52,9 @@ impl CompiledQuery {
         self.terms.is_empty()
     }
 
-    /// Does `row` satisfy every term? `lower_buf` is scratch space reused
-    /// across rows so the hot loop does not allocate.
+    /// Does `row` satisfy every term? String-based twin of `matches_fields`,
+    /// kept for tests and callers that already hold parsed rows.
+    #[allow(dead_code)]
     pub fn matches(&self, row: &[String], lower_buf: &mut String) -> bool {
         for term in &self.terms {
             let hit = match term.column {
@@ -70,6 +73,7 @@ impl CompiledQuery {
 }
 
 impl Matcher {
+    #[allow(dead_code)]
     fn test(&self, cell: &str, lower_buf: &mut String) -> bool {
         match self {
             Matcher::Contains(needle) => {
@@ -89,9 +93,95 @@ impl Matcher {
                 lowercase_into(cell.trim(), lower_buf);
                 lower_buf == needle
             }
+            Matcher::Regex(regex) => regex.is_match(cell.as_bytes()),
+        }
+    }
+
+    /// Byte-level twin of `test` for the allocation-free scanner.
+    #[inline]
+    pub fn test_bytes(&self, cell: &[u8], lower_buf: &mut Vec<u8>) -> bool {
+        match self {
+            Matcher::Contains(needle) => {
+                if cell.is_empty() {
+                    return needle.is_empty();
+                }
+                if needle.is_ascii() {
+                    return contains_ascii_ci(cell, needle.as_bytes());
+                }
+                lowercase_bytes_into(cell, lower_buf);
+                contains_bytes(lower_buf, needle.as_bytes())
+            }
+            Matcher::Exact(needle) => {
+                let trimmed = trim_ascii(cell);
+                if needle.is_ascii() {
+                    return trimmed.len() == needle.len() && trimmed.eq_ignore_ascii_case(needle.as_bytes());
+                }
+                lowercase_bytes_into(trimmed, lower_buf);
+                lower_buf.as_slice() == needle.as_bytes()
+            }
             Matcher::Regex(regex) => regex.is_match(cell),
         }
     }
+}
+
+impl CompiledQuery {
+    /// Evaluate against a scanned row: `fields` index into `bytes`.
+    #[inline]
+    pub fn matches_fields(&self, bytes: &[u8], fields: &[Field], unescape: &mut Vec<u8>, lower_buf: &mut Vec<u8>) -> bool {
+        for term in &self.terms {
+            let hit = match term.column {
+                Some(index) => match fields.get(index) {
+                    Some(field) => {
+                        let cell = field_bytes(bytes, field, unescape);
+                        term.matcher.test_bytes(cell, lower_buf)
+                    }
+                    None => false,
+                },
+                None => fields.iter().any(|field| {
+                    let cell = field_bytes(bytes, field, unescape);
+                    term.matcher.test_bytes(cell, lower_buf)
+                }),
+            };
+            if hit == term.negated {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+fn trim_ascii(cell: &[u8]) -> &[u8] {
+    let mut start = 0;
+    let mut end = cell.len();
+    while start < end && cell[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && cell[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    &cell[start..end]
+}
+
+fn lowercase_bytes_into(cell: &[u8], buf: &mut Vec<u8>) {
+    buf.clear();
+    match std::str::from_utf8(cell) {
+        Ok(text) => {
+            for ch in text.chars() {
+                let mut tmp = [0u8; 4];
+                for lower in ch.to_lowercase() {
+                    buf.extend_from_slice(lower.encode_utf8(&mut tmp).as_bytes());
+                }
+            }
+        }
+        Err(_) => {
+            let lossy = String::from_utf8_lossy(cell).to_lowercase();
+            buf.extend_from_slice(lossy.as_bytes());
+        }
+    }
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.is_empty() || memchr::memmem::find(haystack, needle).is_some()
 }
 
 /// Case-insensitive ASCII substring search. Non-ASCII bytes in `haystack`
@@ -117,6 +207,7 @@ fn contains_ascii_ci(haystack: &[u8], needle: &[u8]) -> bool {
     false
 }
 
+#[allow(dead_code)]
 fn lowercase_into(source: &str, buf: &mut String) {
     buf.clear();
     if source.is_ascii() {

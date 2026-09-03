@@ -5,6 +5,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde::Serialize;
 
+use super::scan::BlockIndex;
 use super::CsvError;
 
 pub mod query;
@@ -51,6 +52,8 @@ pub struct FilterBuildOptions {
     pub data_start: u64,
     pub delimiter: u8,
     pub headers: Vec<String>,
+    /// Row index from the open document; built on the fly when absent.
+    pub blocks: Option<BlockIndex>,
     pub query: String,
     pub total_rows: u64,
     pub generation: u64,
@@ -64,6 +67,7 @@ pub fn build_filter(options: FilterBuildOptions) -> Result<(), CsvError> {
         data_start,
         delimiter,
         headers,
+        blocks,
         query,
         total_rows,
         generation,
@@ -84,6 +88,7 @@ pub fn build_filter(options: FilterBuildOptions) -> Result<(), CsvError> {
         &source_path,
         data_start,
         delimiter,
+        blocks,
         &compiled,
         |scanned, matched| {
             if !is_active(&generation_state, generation) {
@@ -150,6 +155,7 @@ mod tests {
             data_start: 0,
             delimiter: b',',
             headers,
+            blocks: None,
             query: query.to_owned(),
             total_rows,
             generation: 1,
@@ -213,6 +219,7 @@ mod tests {
             data_start: 0,
             delimiter: b',',
             headers: vec!["name".to_owned()],
+            blocks: None,
             query: String::new(),
             total_rows: 3,
             generation: 1,

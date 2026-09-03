@@ -4,6 +4,7 @@ mod export;
 mod filter;
 mod parser;
 mod profile;
+pub mod scan;
 mod search;
 mod sort;
 
@@ -140,6 +141,7 @@ mod perf_timing {
                 data_start,
                 delimiter,
                 headers: headers.clone(),
+                blocks: Some(doc.block_index()),
                 query: query.to_owned(),
                 total_rows: rows,
                 generation: 1,
@@ -163,6 +165,7 @@ mod perf_timing {
                 data_start,
                 delimiter,
                 keys,
+                blocks: Some(doc.block_index()),
                 spill_dir,
                 generation: 1,
                 generation_state: Arc::new(AtomicU64::new(1)),
@@ -194,13 +197,30 @@ mod perf_timing {
             generation: 1,
             generation_state: Arc::new(AtomicU64::new(1)),
             state: export_state,
-            fetch_chunk: |visible_start: u64, indices: &[u64]| {
-                let mut out = Vec::with_capacity(indices.len());
-                for chunk in indices.chunks(256) {
-                    let batch = doc.get_rows_at_physical_data_indices(visible_start, chunk, 0, 9)?;
-                    out.extend(batch.rows);
+            fetch_chunk: {
+                // Same strategy as the export command: one parallel offset sweep, then direct reads.
+                let map = scan::FileMap::open(&read_path).unwrap();
+                let mut wanted = mask.clone();
+                wanted.sort_unstable();
+                let offsets = scan::row_offsets(map.bytes(), &doc.block_index(), delimiter, &wanted);
+                move |_visible_start: u64, indices: &[u64]| {
+                    let bytes = map.bytes();
+                    let mut out = Vec::with_capacity(indices.len());
+                    let mut fields = Vec::new();
+                    let mut scratch = Vec::new();
+                    for &phys in indices {
+                        let offset = wanted.binary_search(&phys).ok().map(|i| offsets[i]).unwrap_or(bytes.len());
+                        let mut scanner = scan::RowScanner::new(bytes, offset, delimiter);
+                        let mut row = Vec::with_capacity(9);
+                        if scanner.next_row(&mut fields) {
+                            for f in &fields {
+                                row.push(scan::field_string(bytes, f, &mut scratch));
+                            }
+                        }
+                        out.push(row);
+                    }
+                    Ok(out)
                 }
-                Ok(out)
             },
         })
         .unwrap();

@@ -285,6 +285,7 @@ async fn start_csv_sort(
             data_start: document.read_data_start(),
             delimiter: document.delimiter(),
             total_rows: document.data_row_count(),
+            blocks: document.block_index(),
         }
     };
 
@@ -312,6 +313,7 @@ async fn start_csv_sort(
         data_start: prepared.data_start,
         delimiter: prepared.delimiter,
         keys,
+        blocks: Some(prepared.blocks),
         spill_dir,
         generation,
         generation_state: Arc::clone(&sort_generation),
@@ -360,6 +362,7 @@ struct SortStartParams {
     data_start: u64,
     delimiter: u8,
     total_rows: u64,
+    blocks: csv::scan::BlockIndex,
 }
 
 struct FilterStartParams {
@@ -368,6 +371,7 @@ struct FilterStartParams {
     delimiter: u8,
     total_rows: u64,
     headers: Vec<String>,
+    blocks: csv::scan::BlockIndex,
 }
 
 #[tauri::command]
@@ -406,6 +410,7 @@ async fn start_csv_filter(
             delimiter: document.delimiter(),
             total_rows: document.data_row_count(),
             headers: document.summarize().headers,
+            blocks: document.block_index(),
         }
     };
 
@@ -430,6 +435,7 @@ async fn start_csv_filter(
         data_start: prepared.data_start,
         delimiter: prepared.delimiter,
         headers: prepared.headers,
+        blocks: Some(prepared.blocks),
         query: trimmed,
         total_rows: prepared.total_rows,
         generation,
@@ -480,12 +486,9 @@ struct ExportStartParams {
     visible_indices: Vec<u64>,
     /// Physical column indices to include in the export, in output order.
     column_indices: Vec<usize>,
+    read_path: PathBuf,
+    blocks: csv::scan::BlockIndex,
 }
-
-/// Maximum rows per `get_rows_at_physical_data_indices` call. The document
-/// caps batches at this size; the export driver hands us chunks of
-/// `EXPORT_CHUNK_ROWS` (>256) so we sub-batch under one document lock.
-const EXPORT_FETCH_BATCH: usize = 256;
 
 #[tauri::command]
 async fn start_csv_export(
@@ -560,6 +563,8 @@ async fn start_csv_export(
             delimiter: document.delimiter(),
             visible_indices,
             column_indices: columns,
+            read_path: document.read_path().to_path_buf(),
+            blocks: document.block_index(),
         }
     };
 
@@ -578,7 +583,11 @@ async fn start_csv_export(
         };
     }
 
-    let document_for_fetch = Arc::clone(&document_state);
+    let read_path = prepared.read_path.clone();
+    let blocks = prepared.blocks.clone();
+    let delimiter = prepared.delimiter;
+    let all_visible = prepared.visible_indices.clone();
+    let mut lookup: Option<(csv::scan::FileMap, Vec<u64>, Vec<usize>)> = None;
     let state_for_error = Arc::clone(&export_state);
     let generation_for_error = Arc::clone(&export_generation);
     let column_indices = prepared.column_indices;
@@ -591,31 +600,44 @@ async fn start_csv_export(
         generation,
         generation_state: Arc::clone(&export_generation),
         state: Arc::clone(&export_state),
-        fetch_chunk: move |visible_start: u64, indices: &[u64]| {
-            let mut guard = document_for_fetch.lock();
-            let document = guard.as_mut().ok_or(csv::CsvError::NoDocument)?;
-
+        fetch_chunk: move |_visible_start: u64, indices: &[u64]| {
+            // First call: map the source and resolve the byte offset of every
+            // exported row in one parallel sweep. Rows are then read straight
+            // from the map, so a sorted or filtered export costs one pass
+            // over the file plus the writes, and never touches the document lock.
+            let (map, wanted, offsets) = lookup.get_or_insert_with(|| {
+                let map = csv::scan::FileMap::open(&read_path).expect("export source is readable");
+                let mut wanted = all_visible.clone();
+                wanted.sort_unstable();
+                wanted.dedup();
+                let offsets = csv::scan::row_offsets(map.bytes(), &blocks, delimiter, &wanted);
+                (map, wanted, offsets)
+            });
+            let bytes = map.bytes();
             let mut out: Vec<Vec<String>> = Vec::with_capacity(indices.len());
-            let header_count = document.summarize().headers.len();
-            let mut offset = 0usize;
-            while offset < indices.len() {
-                let end = (offset + EXPORT_FETCH_BATCH).min(indices.len());
-                let sub = &indices[offset..end];
-                let batch = document.get_rows_at_physical_data_indices(
-                    visible_start + offset as u64,
-                    sub,
-                    0,
-                    header_count,
-                )?;
-                // Project each fetched row down to the requested columns.
-                for row in batch.rows {
-                    let mut projected = Vec::with_capacity(column_indices.len());
+            let mut fields = Vec::with_capacity(32);
+            let mut scratch = Vec::new();
+            for &phys in indices {
+                let offset = wanted
+                    .binary_search(&phys)
+                    .ok()
+                    .map(|i| offsets[i])
+                    .unwrap_or(bytes.len());
+                let mut projected = Vec::with_capacity(column_indices.len());
+                let mut scanner = csv::scan::RowScanner::new(bytes, offset, delimiter);
+                if offset < bytes.len() && scanner.next_row(&mut fields) {
                     for &col in &column_indices {
-                        projected.push(row.get(col).cloned().unwrap_or_default());
+                        projected.push(
+                            fields
+                                .get(col)
+                                .map(|f| csv::scan::field_string(bytes, f, &mut scratch))
+                                .unwrap_or_default(),
+                        );
                     }
-                    out.push(projected);
+                } else {
+                    projected.resize(column_indices.len(), String::new());
                 }
-                offset = end;
+                out.push(projected);
             }
             Ok(out)
         },

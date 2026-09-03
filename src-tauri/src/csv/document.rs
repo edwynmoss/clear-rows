@@ -10,6 +10,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use super::profile::{delimiter_label, Encoding, EncodingSource, ProfiledCsvFile};
+use super::scan::{BlockIndex, FileMap, RowScanner};
 use super::{profile_csv_path, CsvFileProfile, CsvUtf8Parser};
 
 #[derive(Default)]
@@ -99,13 +100,51 @@ pub struct CsvDocument {
     /// when known. Lets ascending reads (filtered views, exports) skip
     /// forward instead of re-seeking to a block checkpoint every row.
     parser_row: Option<u64>,
-    indexer: Option<CsvUtf8Parser<File>>,
+    indexer: Option<FastIndexer>,
     // Must be the last field: declaration order is drop order, so the cache
     // file is removed only after `parser` and `indexer` have released their
     // File handles (Windows refuses removal while handles are open).
     // Held for its Drop side-effect; not read in release builds.
     #[allow(dead_code)]
     cache_guard: Option<CacheGuard>,
+}
+
+/// Memory-mapped forward-only row walker used to build the block index.
+struct FastIndexer {
+    map: FileMap,
+    pos: usize,
+    delimiter: u8,
+}
+
+impl FastIndexer {
+    fn open(path: &Path, start: u64, delimiter: u8) -> std::io::Result<Self> {
+        let map = FileMap::open(path)?;
+        let pos = (start as usize).min(map.bytes().len());
+        Ok(Self { map, pos, delimiter })
+    }
+
+    fn position(&self) -> u64 {
+        self.pos as u64
+    }
+
+    fn skip_row(&mut self) -> bool {
+        let mut scanner = RowScanner::new(self.map.bytes(), self.pos, self.delimiter);
+        let advanced = scanner.skip_row();
+        self.pos = scanner.position();
+        advanced
+    }
+
+    fn read_row(&mut self) -> Option<Vec<String>> {
+        let bytes = self.map.bytes();
+        let mut scanner = RowScanner::new(bytes, self.pos, self.delimiter);
+        let mut fields = Vec::new();
+        if !scanner.next_row(&mut fields) {
+            return None;
+        }
+        self.pos = scanner.position();
+        let mut scratch = Vec::new();
+        Some(fields.iter().map(|f| super::scan::field_string(bytes, f, &mut scratch)).collect())
+    }
 }
 
 pub(crate) struct CacheGuard {
@@ -182,10 +221,8 @@ impl CsvDocument {
         // (indexed_bytes / file_size) meaningful in both cases.
         let file_size = read_path.metadata()?.len();
 
-        let mut index_file = File::open(&read_path)?;
-        index_file.seek(SeekFrom::Start(read_data_start))?;
         let delimiter = profiled.delimiter;
-        let mut indexer = CsvUtf8Parser::new(index_file, delimiter)?;
+        let mut indexer = FastIndexer::open(&read_path, read_data_start, delimiter)?;
 
         let mut block_starts: Vec<u64> = Vec::new();
         let mut row_index: u64 = 0;
@@ -193,12 +230,12 @@ impl CsvDocument {
         let mut is_complete = false;
         let indexed_bytes;
 
-        block_starts.push(indexer.next_byte_offset());
-        match indexer.try_read_row()? {
+        block_starts.push(indexer.position());
+        match indexer.read_row() {
             Some(fields) => {
                 headers = fields;
                 row_index += 1;
-                indexed_bytes = indexer.next_byte_offset();
+                indexed_bytes = indexer.position();
             }
             None => {
                 is_complete = true;
@@ -275,6 +312,21 @@ impl CsvDocument {
         self.read_data_start
     }
 
+    /// Snapshot of the row index for parallel scans. Only rows indexed so far
+    /// are covered; callers should wait for `is_indexing_complete`.
+    pub fn block_index(&self) -> BlockIndex {
+        // A checkpoint is pushed *before* each block is scanned, so a trailing
+        // entry equal to the current end marks an empty block; drop it.
+        let mut starts = self.block_starts.clone();
+        if starts.len() > 1
+            && starts.last().copied() == Some(self.indexed_bytes)
+            && self.physical_rows % self.block_size == 0
+        {
+            starts.pop();
+        }
+        BlockIndex { starts, block_size: self.block_size, end: self.indexed_bytes }
+    }
+
     pub fn is_indexing_complete(&self) -> bool {
         self.is_complete
     }
@@ -306,20 +358,17 @@ impl CsvDocument {
 
         for _ in 0..max_data_rows {
             if self.physical_rows % self.block_size == 0 {
-                self.block_starts.push(indexer.next_byte_offset());
+                self.block_starts.push(indexer.position());
             }
 
-            match indexer.try_skip_row()? {
-                Some(()) => {
-                    self.physical_rows += 1;
-                    self.indexed_bytes = indexer.next_byte_offset().min(self.file_size);
-                }
-                None => {
-                    reached_end = true;
-                    break;
-                }
+            if indexer.skip_row() {
+                self.physical_rows += 1;
+            } else {
+                reached_end = true;
+                break;
             }
         }
+        self.indexed_bytes = indexer.position().min(self.file_size);
 
         if reached_end {
             self.is_complete = true;
