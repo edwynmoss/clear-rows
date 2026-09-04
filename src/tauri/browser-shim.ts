@@ -8,6 +8,7 @@
 
 import { parseFilterQuery, type FilterTerm } from "../csv/filter-query";
 import type {
+  ColumnStats,
   CsvFileProfile,
   CsvFileProfileResult,
   CsvSearchMatch,
@@ -23,7 +24,7 @@ import type {
 } from "../types/csv";
 
 import { detectHeader, syntheticHeaders, HEADER_SAMPLE_ROWS } from "../csv/header-detect";
-import { detectColumnType, type ColumnProfile } from "../csv/column-types";
+import { detectColumnType, parseDateTime, parseNumber, type ColumnProfile } from "../csv/column-types";
 
 type Dataset = {
   path: string;
@@ -80,6 +81,8 @@ export async function shimInvoke<T>(command: string, args: Record<string, unknow
       return startFilter(String(args.query)) as T;
     case "csv_filter_status":
       return filterStatus as T;
+    case "column_stats":
+      return columnStats(Number(args.column), Number(args.topN ?? 12)) as T;
     case "clear_csv_filter":
       filterMask = null;
       filterStatus = emptyFilterStatus();
@@ -155,6 +158,76 @@ function indexStatus(): IndexStatus {
     indexed_bytes: current.sizeBytes,
     file_size: current.sizeBytes,
     error: null,
+  };
+}
+
+function columnStats(column: number, topN: number): ColumnStats {
+  if (!current) throw new Error("No document is open");
+  const profile = current.columnTypes[column];
+  const indices = filterMask ?? current.rows.map((_, i) => i);
+  const counts = new Map<string, number>();
+  let empty = 0;
+  let numCount = 0;
+  let numSum = 0;
+  let numMin = Infinity;
+  let numMax = -Infinity;
+  let timeCount = 0;
+  let timeMin = Infinity;
+  let timeMax = -Infinity;
+  let earliest = "";
+  let latest = "";
+  let lenMin = Infinity;
+  let lenMax = 0;
+  let lenSum = 0;
+  for (const i of indices) {
+    const cell = (current.rows[i]?.[column] ?? "").trim();
+    if (!cell) {
+      empty++;
+      continue;
+    }
+    counts.set(cell, (counts.get(cell) ?? 0) + 1);
+    lenMin = Math.min(lenMin, cell.length);
+    lenMax = Math.max(lenMax, cell.length);
+    lenSum += cell.length;
+    if (profile?.type === "integer" || profile?.type === "decimal") {
+      const n = parseNumber(cell);
+      if (n !== null) {
+        numCount++;
+        numSum += n;
+        numMin = Math.min(numMin, n);
+        numMax = Math.max(numMax, n);
+      }
+    } else if (profile?.type === "date" || profile?.type === "datetime") {
+      const d = parseDateTime(cell, profile.date_order);
+      if (d) {
+        timeCount++;
+        if (d.millis < timeMin) {
+          timeMin = d.millis;
+          earliest = cell;
+        }
+        if (d.millis > timeMax) {
+          timeMax = d.millis;
+          latest = cell;
+        }
+      }
+    }
+  }
+  const top = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+    .slice(0, topN)
+    .map(([value, count]) => ({ value, count }));
+  const nonEmpty = indices.length - empty;
+  return {
+    column,
+    rows: indices.length,
+    empty,
+    distinct: counts.size,
+    distinct_is_lower_bound: false,
+    top,
+    numeric: numCount > 0 ? { min: numMin, max: numMax, mean: numSum / numCount, sum: numSum, parsed: numCount } : null,
+    temporal: timeCount > 0 ? { earliest, latest, parsed: timeCount } : null,
+    text: nonEmpty > 0 ? { shortest: lenMin, longest: lenMax, mean_length: lenSum / nonEmpty } : null,
+    cancelled: false,
   };
 }
 

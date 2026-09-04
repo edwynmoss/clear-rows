@@ -38,6 +38,7 @@ import { isDesktopRuntime } from "../tauri/runtime";
 import { appVersion, pickFile, pickFiles, pickSavePath, wireFileDrop } from "../tauri/platform";
 import { checkForUpdate, installPendingUpdate, type UpdateInfo } from "./updates";
 import { columnTypeLabel } from "../csv/column-types";
+import { createColumnPanel } from "../components/column-panel";
 import type {
   CsvFileProfileResult,
   CsvSearchMatch,
@@ -108,6 +109,31 @@ export function mountApplication(host: HTMLElement): void {
     },
   });
 
+  const columnPanel = createColumnPanel({
+    onClose: () => {
+      columnPanel.hide();
+      grid.scrollRegion.focus({ preventScroll: true });
+    },
+    onFilterToValue: (columnIndex, value) => void applyFilter(appendTerm(valueTerm(columnIndex, value, false))),
+    onExcludeValue: (columnIndex, value) => void applyFilter(appendTerm(valueTerm(columnIndex, value, true))),
+    onFilterEmpty: (columnIndex) => void applyFilter(appendTerm(`${quoteColumn(session.headers[columnIndex] ?? "")}=""`)),
+    onSort: (columnIndex, direction) => void setSortDirection(columnIndex, direction),
+    onHide: (columnIndex) => {
+      columnPanel.hide();
+      hideColumn(columnIndex);
+    },
+    onCopy: (text, label) => void copyText(text, label),
+    onSwitch: (columnIndex) => void openColumnPanel(columnIndex),
+  });
+
+  /** `column=value` or `-column=value`, quoted the way the grammar wants. */
+  function valueTerm(columnIndex: number, value: string, negated: boolean): string {
+    const header = session.headers[columnIndex] ?? "";
+    const needsQuotes = /[\s:"=/]/.test(value) || value.startsWith("-") || value.length === 0;
+    const quoted = needsQuotes ? `"${value.replace(/"/g, '""')}"` : value;
+    return `${negated ? "-" : ""}${quoteColumn(header)}=${quoted}`;
+  }
+
   const jumpToRow = createJumpToRow({
     onApply: (rowNumber) => void runJumpToRow(rowNumber),
   });
@@ -117,7 +143,7 @@ export function mountApplication(host: HTMLElement): void {
   const gridColumn = document.createElement("div");
   gridColumn.className = "cr-gridcolumn";
   gridColumn.append(jumpToRow.root, grid.root);
-  gridArea.append(gridColumn, cellDetail.root);
+  gridArea.append(gridColumn, cellDetail.root, columnPanel.root);
 
   const emptyState = createCsvEmptyState({
     onOpenClick: () => void runOpenDialog(),
@@ -750,6 +776,7 @@ export function mountApplication(host: HTMLElement): void {
         queryBar.setCount(status.matched_rows, status.total_rows);
         queryBar.setBusy(false);
         statusBar.setActivity(null);
+        refreshColumnPanel();
         statusBar.setMessage(
           status.matched_rows === 0 ? "No rows match" : `${formatInt(status.matched_rows)} of ${formatInt(status.total_rows)} rows match`,
           status.matched_rows === 0 ? "warning" : "neutral",
@@ -794,6 +821,7 @@ export function mountApplication(host: HTMLElement): void {
     queryBar.setValue("");
     statusBar.setActivity(null);
     if (hadFilter) statusBar.setMessage(`${pluralize(session.rowCount, "row")}`, "neutral");
+    if (hadFilter) refreshColumnPanel();
     virtualizer.resetRowsForVisibilityChange();
     virtualizer.updateAria();
     jumpToRow.setMaxRow(session.scrollRowCount);
@@ -1198,8 +1226,45 @@ export function mountApplication(host: HTMLElement): void {
     }
   }
 
+  let columnPanelRequest = 0;
+
+  /** Show the column pane and count its values over the rows in view. */
+  async function openColumnPanel(columnIndex: number): Promise<void> {
+    if (!session.path) return;
+    if (columnIndex < 0 || columnIndex >= session.headers.length) return;
+    cellDetail.hide();
+    const request = ++columnPanelRequest;
+    const inView = session.activeFilter ? session.activeFilter.matchedRows : session.rowCount;
+    columnPanel.open({
+      index: columnIndex,
+      name: session.headers[columnIndex] ?? "",
+      profile: session.columnTypes[columnIndex],
+      viewLabel: session.activeFilter ? `${formatInt(inView)} rows in view` : `${formatInt(inView)} rows`,
+      columns: session.headers,
+    });
+    if (isIndexing) {
+      columnPanel.setError(columnIndex, "Still indexing the file. Values are counted once that finishes.");
+      return;
+    }
+    try {
+      const stats = await csvApi.fetchColumnStats(columnIndex, 12);
+      if (request !== columnPanelRequest) return;
+      columnPanel.setStats(columnIndex, stats);
+    } catch (err) {
+      if (request !== columnPanelRequest) return;
+      columnPanel.setError(columnIndex, formatError(err));
+    }
+  }
+
+  /** The view changed (filter applied or cleared); recount if the pane is open. */
+  function refreshColumnPanel(): void {
+    const column = columnPanel.currentColumn();
+    if (column !== null) void openColumnPanel(column);
+  }
+
   async function openCellDetail(cell: HighlightedCell | null = virtualizer.getHighlightedCell()): Promise<void> {
     if (!cell || !session.path) return;
+    columnPanel.hide();
     try {
       const batch = await csvApi.fetchCsvRows(cell.rowIndex, 1, cell.columnIndex, 1);
       const value = batch.rows[0]?.[0] ?? "";
@@ -1228,6 +1293,7 @@ export function mountApplication(host: HTMLElement): void {
     menu.append(head);
 
     const items: Array<{ label: string; run: () => void; disabled?: boolean }> = [
+      { label: "Inspect column", run: () => void openColumnPanel(columnIndex) },
       { label: "Sort ascending", run: () => void setSortDirection(columnIndex, "asc"), disabled: isIndexing },
       { label: "Sort descending", run: () => void setSortDirection(columnIndex, "desc"), disabled: isIndexing },
       { label: "Clear sort", run: () => void applySortKeys(++sortGeneration, [], columnIndex), disabled: session.activeSort.length === 0 },
@@ -1305,6 +1371,7 @@ export function mountApplication(host: HTMLElement): void {
       { id: "recent-search", label: "Restore last search file set", enabled: getRecentSearchPaths().length > 0, run: () => void applySearchFiles(getRecentSearchPaths(), false) },
       { id: "jump", label: "Go to row…", shortcut: "Ctrl G", enabled: hasFile, run: () => { jumpToRow.setMaxRow(session.scrollRowCount); jumpToRow.open(); } },
       { id: "detail", label: "Show cell detail", shortcut: "Enter", enabled: hasFile && virtualizer.getHighlightedCell() !== null, run: () => void openCellDetail() },
+      { id: "inspect", label: "Inspect column", hint: "counts, ranges and the most common values", enabled: hasFile, run: () => void openColumnPanel(virtualizer.getHighlightedCell()?.columnIndex ?? session.visibleColumnIndices()[0] ?? 0) },
       { id: "copy-cell", label: "Copy selected cell", shortcut: "Ctrl C", enabled: hasFile, run: () => void copyHighlighted("cell") },
       { id: "copy-row", label: "Copy selected row", shortcut: "Ctrl Shift C", enabled: hasFile, run: () => void copyHighlighted("row") },
       { id: "clear-filter", label: "Clear filter", shortcut: "Esc", enabled: session.activeFilter !== null, run: () => void clearFilter() },
@@ -1395,6 +1462,7 @@ export function mountApplication(host: HTMLElement): void {
     session.activeSort = [];
     isIndexing = false;
     virtualizer.reset();
+    columnPanel.hide();
     cellDetail.hide();
     columnVisibilityControl.setColumns([], new Set());
     queryBar.setChips([]);
@@ -1489,6 +1557,7 @@ export function mountApplication(host: HTMLElement): void {
         break;
       case "Escape":
         if (cellDetail.isOpen()) cellDetail.hide();
+        else if (columnPanel.isOpen()) columnPanel.hide();
         else virtualizer.setHighlightedCell(null);
         handled();
         break;

@@ -334,7 +334,6 @@ impl CsvDocument {
     }
 
     /// Detected type of each column, in header order.
-    #[allow(dead_code)]
     pub fn column_types(&self) -> &[ColumnProfile] {
         &self.column_types
     }

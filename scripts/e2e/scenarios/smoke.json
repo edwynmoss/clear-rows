@@ -81,6 +81,54 @@
     "key": "Escape"
   },
   {
+    "eval": "document.querySelectorAll('.cr-col')[3].querySelector('.cr-col-menu').click(); 'menu'"
+  },
+  {
+    "wait": 200
+  },
+  {
+    "eval": "[...document.querySelectorAll('.cr-menu-item')].find(b => b.textContent === 'Inspect column').click(); 'inspect'"
+  },
+  {
+    "waitFor": "!document.querySelector('.cr-colpanel').hidden && document.querySelectorAll('.cr-colpanel .cr-value-keep').length > 0",
+    "timeout": 30000
+  },
+  {
+    "expect": "document.querySelector('.cr-colpanel .cr-facts dd')?.textContent",
+    "matches": "^1,187$"
+  },
+  {
+    "shot": "04b-column"
+  },
+  {
+    "click": ".cr-colpanel .cr-value-keep"
+  },
+  {
+    "waitFor": "document.querySelectorAll('.cr-chip').length === 3",
+    "timeout": 60000
+  },
+  {
+    "waitFor": "/rows in view/.test(document.querySelector('.cr-colpanel .cr-detail-sub')?.textContent || '')",
+    "timeout": 30000
+  },
+  {
+    "shot": "04c-column-filtered"
+  },
+  {
+    "eval": "document.querySelector('.cr-colpanel .cr-icon-btn').click(); 'closed'"
+  },
+  {
+    "expect": "document.querySelector('.cr-colpanel').hidden",
+    "equals": true
+  },
+  {
+    "eval": "window.__clearRows.applyFilter('process:powershell -severity=low').then(() => 'refiltered')"
+  },
+  {
+    "waitFor": "document.querySelectorAll('.cr-chip').length === 2",
+    "timeout": 60000
+  },
+  {
     "click": ".cr-query-input"
   },
   {
