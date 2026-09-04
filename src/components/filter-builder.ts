@@ -40,6 +40,11 @@ export type FilterBuilderOptions = {
   onSearchAll: (text: string) => void;
   /** Called when the user closes the popover with its button or Escape. */
   onClose?: () => void;
+  /** Filters applied to this file before, newest first; shown while the field is empty. */
+  recentFilters?: () => string[];
+  /** Apply a recent filter as typed. */
+  onRecent?: (query: string) => void;
+  onForgetRecent?: (query: string) => void;
 };
 
 export type FilterBuilder = {
@@ -206,6 +211,10 @@ export function createFilterBuilder(options: FilterBuilderOptions): FilterBuilde
     // Only the word being typed gets suggestions; earlier words are
     // treated as terms the user already knows how to write.
     const text = typed.trimEnd().split(/\s+/).pop() ?? "";
+    if (typed.trim().length === 0) {
+      renderRecent();
+      return;
+    }
     if (text.length === 0 || /[:="]|^\/|^-/.test(text)) {
       suggest.hidden = true;
       return;
@@ -237,6 +246,49 @@ export function createFilterBuilder(options: FilterBuilderOptions): FilterBuilde
       scoped.append(more);
     }
     suggest.append(scoped);
+  }
+
+  /** Filters this file has seen before: one click brings a query back. */
+  function renderRecent(): void {
+    const recent = options.recentFilters?.() ?? [];
+    if (recent.length === 0) {
+      suggest.hidden = true;
+      return;
+    }
+    suggest.hidden = false;
+    const row = document.createElement("div");
+    row.className = "cr-builder-scoped cr-builder-recent";
+    const label = document.createElement("span");
+    label.textContent = "Recent";
+    row.append(label);
+    for (const query of recent) {
+      const chip = document.createElement("span");
+      chip.className = "cr-builder-recentchip";
+      const use = document.createElement("button");
+      use.type = "button";
+      use.className = "cr-builder-colchip";
+      use.textContent = query;
+      use.title = `Apply ${query}`;
+      use.addEventListener("mousedown", (event) => event.preventDefault());
+      use.addEventListener("click", () => options.onRecent?.(query));
+      chip.append(use);
+      if (options.onForgetRecent) {
+        const forget = document.createElement("button");
+        forget.type = "button";
+        forget.className = "cr-builder-forget";
+        forget.setAttribute("aria-label", `Forget ${query}`);
+        forget.title = "Forget";
+        forget.textContent = "\u00d7";
+        forget.addEventListener("mousedown", (event) => event.preventDefault());
+        forget.addEventListener("click", () => {
+          options.onForgetRecent?.(query);
+          renderSuggestions();
+        });
+        chip.append(forget);
+      }
+      row.append(chip);
+    }
+    suggest.append(row);
   }
 
   function suggestion(label: string, run: () => void): HTMLButtonElement {
