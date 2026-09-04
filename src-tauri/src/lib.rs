@@ -726,6 +726,8 @@ pub fn run() {
             composed_view: Arc::new(Mutex::new(None)),
         })
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             open_csv,
             get_csv_rows,

@@ -36,6 +36,7 @@ import { parseFilterQuery, splitFilterTokens, type FilterTerm } from "../csv/fil
 import { CsvGridVirtualizer, type HighlightedCell } from "../csv/grid-virtualizer";
 import { isDesktopRuntime } from "../tauri/runtime";
 import { appVersion, pickFile, pickFiles, pickSavePath, wireFileDrop } from "../tauri/platform";
+import { checkForUpdate, installPendingUpdate, type UpdateInfo } from "./updates";
 import type {
   CsvFileProfileResult,
   CsvSearchMatch,
@@ -324,6 +325,10 @@ export function mountApplication(host: HTMLElement): void {
   syncAvailability();
   virtualizer.bind();
   host.replaceChildren(shell.root);
+
+  // Offer a newer release once per launch, a few seconds after start so the
+  // file the user opened is on screen first. Manual checks come from the palette.
+  window.setTimeout(() => void offerUpdate(false), 4_000);
 
   void appVersion().then((version) => {
     if (!version) return;
@@ -1303,8 +1308,58 @@ export function mountApplication(host: HTMLElement): void {
       { id: "reopen", label: "Reopen with a different encoding or delimiter…", enabled: hasFile, run: () => reopenAsControl.toggle() },
       { id: "export", label: "Export current view…", shortcut: "Ctrl E", enabled: hasFile, run: () => void runExport() },
       { id: "theme", label: `Theme: ${getThemeMode()} → change`, run: () => { cycleThemeMode(); syncThemeButton(); } },
+      { id: "update", label: "Check for updates", enabled: isDesktopRuntime(), run: () => void offerUpdate(true) },
       { id: "close", label: "Close file", enabled: hasFile, run: () => closeFile() },
     ];
+  }
+
+  let updateOffered: UpdateInfo | null = null;
+  let updateInstalling = false;
+
+  /** Ask GitHub for a newer release; show it as a toast. */
+  async function offerUpdate(manual: boolean): Promise<void> {
+    if (updateInstalling) return;
+    if (manual) statusBar.setMessage("Checking for updates", "neutral");
+    const info = await checkForUpdate();
+    if (!info) {
+      if (manual) {
+        statusBar.setMessage("", "neutral");
+        toasts.show({ title: `Clear Rows ${appVersionLabel} is up to date`, tone: "neutral", duration: 4000 });
+      }
+      return;
+    }
+    if (!manual && updateOffered?.version === info.version) return;
+    updateOffered = info;
+    if (manual) statusBar.setMessage("", "neutral");
+    toasts.show({
+      title: `Version ${info.version} is available`,
+      detail: firstLine(info.notes) || `You have ${info.currentVersion}. The update installs in the background and restarts the app.`,
+      tone: "neutral",
+      duration: 0,
+      action: { label: "Install and restart", onClick: () => void installUpdate() },
+    });
+  }
+
+  async function installUpdate(): Promise<void> {
+    if (updateInstalling) return;
+    updateInstalling = true;
+    toasts.clear();
+    statusBar.setActivity({ label: "updating", ratio: null, detail: "downloading" });
+    try {
+      await installPendingUpdate((progress) => {
+        const detail = progress.total ? `${formatBytes(progress.downloaded)} of ${formatBytes(progress.total)}` : formatBytes(progress.downloaded);
+        statusBar.setActivity({ label: "updating", ratio: progress.ratio, detail });
+      });
+      statusBar.setActivity({ label: "restarting", ratio: 1, detail: "" });
+    } catch (err) {
+      updateInstalling = false;
+      statusBar.setActivity(null);
+      toasts.show({ title: "The update could not be installed", detail: formatError(err), tone: "warning", duration: 0 });
+    }
+  }
+
+  function firstLine(text: string): string {
+    return text.split(/\r?\n/).map((line) => line.replace(/^[#*\-\s]+/, "").trim()).find((line) => line.length > 0) ?? "";
   }
 
   async function refitColumns(): Promise<void> {
