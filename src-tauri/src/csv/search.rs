@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use rayon::prelude::*;
 
-use super::document::prepare_utf8_source;
+use super::document::{inflate_if_compressed, prepare_utf8_source};
 use super::profile_csv_path;
 use super::scan::{field_bytes, field_string, BlockIndex, Field, FileMap, RowScanner};
 
@@ -260,6 +260,17 @@ fn search_one_file(
     progress: &mut CsvSearchProgress,
     publish_progress: &mut impl FnMut(CsvSearchProgress),
 ) -> Result<SearchFileOutcome, CsvSearchError> {
+    let _inflated_guard;
+    let path = match inflate_if_compressed(&path)? {
+        Some((inflated, guard)) => {
+            _inflated_guard = Some(guard);
+            inflated
+        }
+        None => {
+            _inflated_guard = None;
+            path
+        }
+    };
     let profiled = profile_csv_path(&path)?;
     if profiled.profile.binary_like {
         return Err(CsvSearchError::UnsupportedFile(

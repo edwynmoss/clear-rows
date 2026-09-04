@@ -111,6 +111,8 @@ pub struct CsvFileProfile {
     pub has_header: bool,
     /// "detected" or "user".
     pub header_source: String,
+    /// "gzip" when the file was decompressed before reading, else None.
+    pub compression: Option<String>,
     pub warnings: Vec<String>,
 }
 
@@ -187,6 +189,7 @@ pub fn profile_csv_path(path: &Path) -> std::io::Result<ProfiledCsvFile> {
             binary_like,
             has_header: true,
             header_source: "detected".to_owned(),
+            compression: None,
             warnings,
         },
         delimiter: detection.delimiter,

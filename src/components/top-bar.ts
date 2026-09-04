@@ -9,6 +9,8 @@ export type FileChipInfo = {
   encoding: string;
   encodingSource: string;
   delimiterLabel: string | null;
+  /** "gzip" when the file was unpacked on open. */
+  compression?: string | null;
   isIndexing: boolean;
   hasWarning: boolean;
 };
@@ -114,6 +116,11 @@ export function createTopBar(options: TopBarOptions): TopBar {
         const src = document.createElement("small");
         src.textContent = " · detected";
         enc.append(src);
+      }
+      if (info.compression) {
+        const zip = document.createElement("small");
+        zip.textContent = ` · ${info.compression}`;
+        enc.append(zip);
       }
 
       fileChip.append(name, meta, enc);

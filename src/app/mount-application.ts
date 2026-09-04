@@ -445,6 +445,7 @@ export function mountApplication(host: HTMLElement): void {
       encoding: profile.encoding,
       encodingSource: profile.encoding_source,
       delimiterLabel: profile.delimiter_label,
+      compression: profile.compression,
       isIndexing,
       hasWarning: profile.warnings.some((w) => !isSoftWarning(w)) || profile.encoding === "utf-8-lossy",
     });

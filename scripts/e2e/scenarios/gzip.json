@@ -1,0 +1,35 @@
+[
+  {
+    "waitFor": "window.__clearRows && window.__clearRows.session.rowCount > 0",
+    "timeout": 120000
+  },
+  {
+    "open": "sample-20k.csv.gz"
+  },
+  {
+    "waitFor": "/sample-20k\\.csv\\.gz$/.test(window.__clearRows.session.path || '') && window.__clearRows.session.rowCount === 20000 && !document.querySelector('.cr-status-live:not([hidden])')",
+    "timeout": 120000
+  },
+  {
+    "expect": "window.__clearRows.session.headers[0]",
+    "equals": "timestamp"
+  },
+  {
+    "expect": "document.querySelector('.cr-filechip-enc')?.textContent || ''",
+    "matches": "gzip"
+  },
+  {
+    "shot": "12-gzip"
+  },
+  {
+    "eval": "window.__clearRows.applyFilter('severity=critical').then(() => 'filtered')"
+  },
+  {
+    "waitFor": "window.__clearRows.session.activeFilter !== null",
+    "timeout": 60000
+  },
+  {
+    "expect": "document.querySelector('.cr-query-count')?.textContent",
+    "matches": "of 20,000"
+  }
+]

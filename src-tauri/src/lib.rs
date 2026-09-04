@@ -222,10 +222,10 @@ async fn profile_csv_files(paths: Vec<String>) -> Result<Vec<CsvFileProfileResul
         paths
             .into_iter()
             .map(
-                |path| match csv::profile_csv_path(std::path::Path::new(&path)) {
-                    Ok(profiled) => CsvFileProfileResult {
+                |path| match profile_possibly_compressed(std::path::Path::new(&path)) {
+                    Ok(profile) => CsvFileProfileResult {
                         path,
-                        profile: Some(profiled.profile),
+                        profile: Some(profile),
                         error: None,
                     },
                     Err(err) => CsvFileProfileResult {
@@ -239,6 +239,19 @@ async fn profile_csv_files(paths: Vec<String>) -> Result<Vec<CsvFileProfileResul
     })
     .await
     .map_err(|err| err.to_string())
+}
+
+/// Profile a file, peeking into the first megabyte of a gzip stream rather
+/// than unpacking the whole thing just to describe it.
+fn profile_possibly_compressed(path: &std::path::Path) -> Result<csv::CsvFileProfile, csv::CsvError> {
+    match csv::inflate_prefix(path, 1 << 20)? {
+        Some((peek, _guard)) => {
+            let mut profiled = csv::profile_csv_path(&peek)?;
+            profiled.profile.compression = Some("gzip".to_owned());
+            Ok(profiled.profile)
+        }
+        None => Ok(csv::profile_csv_path(path)?.profile),
+    }
 }
 
 #[tauri::command]

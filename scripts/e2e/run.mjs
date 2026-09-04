@@ -8,6 +8,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { gzipSync } from "node:zlib";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -23,12 +24,12 @@ const scenarios = (requested.length > 0 ? requested.map((name) => (name.endsWith
   join(scenariosDir, f),
 );
 
-const sampleFile = process.env.E2E_FILE ?? ensureSampleFile();
-
 // A leftover instance from an aborted run keeps the debugging port, and the
 // driver would then talk to the old app instead of the one launched below.
 stopLeftovers();
 await waitForPortFree(port, 15_000);
+
+const sampleFile = process.env.E2E_FILE ?? ensureSampleFile();
 
 console.log(`launching app with ${sampleFile}`);
 const app = spawn("npm", ["run", "tauri", "dev"], {
@@ -122,7 +123,8 @@ function stopApp() {
 function ensureSampleFile() {
   const path = join(outDir, "sample-20k.csv");
   const headerless = join(outDir, "sample-headerless.csv");
-  if (existsSync(path) && existsSync(headerless)) return path;
+  const gzipped = join(outDir, "sample-20k.csv.gz");
+  if (existsSync(path) && existsSync(headerless) && existsSync(gzipped)) return path;
   const procs = ["powershell.exe", "cmd.exe", "svchost.exe", "chrome.exe", "rundll32.exe", "mshta.exe", "wscript.exe", "explorer.exe", "teams.exe", "outlook.exe"];
   const severities = ["low", "low", "medium", "high", "critical"];
   const countries = ["ZA", "US", "DE", "NL", "BR"];
@@ -146,5 +148,7 @@ function ensureSampleFile() {
   writeFileSync(path, lines.join("\n") + "\n");
   // Same rows without the header, for the "first row is data" scenario.
   writeFileSync(headerless, lines.slice(1).join("\n") + "\n");
+  // The same file gzipped, for the compressed-open scenario.
+  writeFileSync(gzipped, gzipSync(lines.join("\n") + "\n"));
   return path;
 }
