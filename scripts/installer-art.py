@@ -6,6 +6,7 @@ Writes 24-bit BMPs into src-tauri/installer/ (NSIS wants BMP):
   header.bmp   150 x 57   top-right of the inner pages
   sidebar.bmp  164 x 314  left panel of the welcome and finish pages
   splash.bmp   420 x 260  fading splash shown while the installer starts
+  wix-banner.bmp / wix-dialog.bmp  the same look for the MSI (WiX) pages
 Also writes src-tauri/icons/source.png (1024 px app-icon source: the mark on
 a dark rounded tile so it reads on light and dark taskbars) and
 public/app-icon.png (the same tile, used as the web favicon). Regenerate the
@@ -106,6 +107,29 @@ def splash() -> Image.Image:
     return img
 
 
+def wix_banner() -> Image.Image:
+    """WiX top banner on the inner MSI pages: light strip, mark at the right."""
+    def paint(d, k):
+        d.rectangle([0, 0, 493 * k, 58 * k], fill=PAPER)
+        mark(d, 440 * k, 17 * k, 40 * k, INK, GOLD)
+    return supersampled((493, 58), paint)
+
+
+def wix_dialog() -> Image.Image:
+    """WiX welcome/finish background: dark panel on the left, white body."""
+    def paint(d, k):
+        d.rectangle([0, 0, 493 * k, 312 * k], fill=PAPER)
+        d.rectangle([0, 0, 164 * k, 312 * k], fill=NIGHT)
+        mark(d, 30 * k, 96 * k, 104 * k, NIGHT_INK, GOLD)
+        d.rectangle([30 * k, 178 * k, 134 * k, 179 * k], fill=(48, 46, 38))
+    img = supersampled((493, 312), paint)
+    d = ImageDraw.Draw(img)
+    d.text((30, 196), "Clear Rows", font=font(17, "Semibold"), fill=NIGHT_INK)
+    d.text((30, 222), "Large CSV files,", font=font(11), fill=MUTED)
+    d.text((30, 238), "opened instantly.", font=font(11), fill=MUTED)
+    return img
+
+
 def icon_tile(size: int) -> Image.Image:
     """The mark on a dark rounded tile, filling the canvas like a modern app icon."""
     k = 4
@@ -129,7 +153,13 @@ def main() -> None:
     icon_tile(1024).save(ROOT / "src-tauri" / "icons" / "source.png")
     icon_tile(256).save(ROOT / "public" / "app-icon.png")
     print("wrote icon sources")
-    for name, image in (("header.bmp", header()), ("sidebar.bmp", sidebar()), ("splash.bmp", splash())):
+    for name, image in (
+        ("header.bmp", header()),
+        ("sidebar.bmp", sidebar()),
+        ("splash.bmp", splash()),
+        ("wix-banner.bmp", wix_banner()),
+        ("wix-dialog.bmp", wix_dialog()),
+    ):
         image.convert("RGB").save(OUT / name, format="BMP")
         print(f"wrote {OUT / name} ({image.size[0]}x{image.size[1]})")
 
