@@ -23,6 +23,7 @@ import type {
 } from "../types/csv";
 
 import { detectHeader, syntheticHeaders, HEADER_SAMPLE_ROWS } from "../csv/header-detect";
+import { detectColumnType, type ColumnProfile } from "../csv/column-types";
 
 type Dataset = {
   path: string;
@@ -33,6 +34,7 @@ type Dataset = {
   encodingSource: string;
   hasHeader: boolean;
   headerSource: string;
+  columnTypes: ColumnProfile[];
   sizeBytes: number;
 };
 
@@ -134,6 +136,7 @@ function openCsv(path: string, delimiterOverride: string | null, encodingOverrid
     path,
     delimiter: dataset.delimiter.charCodeAt(0),
     headers: dataset.headers,
+    column_types: dataset.columnTypes,
     row_count: dataset.rows.length,
     is_complete: true,
     indexed_bytes: dataset.sizeBytes,
@@ -439,7 +442,9 @@ function decodeAndParse(path: string, input: Uint8Array | string, sizeBytes?: nu
     : syntheticHeaders(Math.max(1, ...records.slice(0, HEADER_SAMPLE_ROWS).map((r) => r.length)));
   const width = headers.length;
   const rows = records.map((r) => (r.length === width ? r : [...r.slice(0, width), ...Array(Math.max(0, width - r.length)).fill("")]));
-  return { path, headers, rows, delimiter, encoding, encodingSource, hasHeader, headerSource, sizeBytes: sizeBytes ?? new Blob([text]).size };
+  const sampleRows = rows.slice(0, 512);
+  const columnTypes = headers.map((_, column) => detectColumnType(sampleRows.map((r) => r[column] ?? "")));
+  return { path, headers, rows, delimiter, encoding, encodingSource, hasHeader, headerSource, columnTypes, sizeBytes: sizeBytes ?? new Blob([text]).size };
 }
 
 function detectDelimiter(text: string): string {

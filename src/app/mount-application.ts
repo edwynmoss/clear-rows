@@ -37,6 +37,7 @@ import { CsvGridVirtualizer, type HighlightedCell } from "../csv/grid-virtualize
 import { isDesktopRuntime } from "../tauri/runtime";
 import { appVersion, pickFile, pickFiles, pickSavePath, wireFileDrop } from "../tauri/platform";
 import { checkForUpdate, installPendingUpdate, type UpdateInfo } from "./updates";
+import { columnTypeLabel } from "../csv/column-types";
 import type {
   CsvFileProfileResult,
   CsvSearchMatch,
@@ -1220,6 +1221,11 @@ export function mountApplication(host: HTMLElement): void {
     const menu = document.createElement("div");
     menu.className = "cr-menu";
     menu.setAttribute("role", "menu");
+
+    const head = document.createElement("div");
+    head.className = "cr-menu-head";
+    head.textContent = `${header} · ${columnTypeLabel(session.columnTypes[columnIndex]?.type)}`;
+    menu.append(head);
 
     const items: Array<{ label: string; run: () => void; disabled?: boolean }> = [
       { label: "Sort ascending", run: () => void setSortDirection(columnIndex, "asc"), disabled: isIndexing },

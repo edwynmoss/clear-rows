@@ -1,7 +1,11 @@
+import type { ColumnProfile } from "../csv/column-types";
+
 export type OpenSummary = {
   path: string;
   delimiter: number;
   headers: string[];
+  /** One entry per header, typed from the first rows. */
+  column_types: ColumnProfile[];
   row_count: number;
   is_complete: boolean;
   indexed_bytes: number;

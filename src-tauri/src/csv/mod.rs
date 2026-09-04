@@ -6,6 +6,7 @@ mod parser;
 mod profile;
 pub mod header;
 pub mod scan;
+pub mod types;
 mod search;
 mod sort;
 

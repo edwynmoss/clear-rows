@@ -32,9 +32,6 @@ pub fn synthetic_headers(count: usize) -> Vec<String> {
     (1..=count).map(|n| format!("Column {n}")).collect()
 }
 
-/// Rows sampled for the header vote (including the candidate header row).
-pub const HEADER_SAMPLE_ROWS: usize = 32;
-
 /// True when `rows[0]` looks like a header for the rows that follow.
 ///
 /// Each column casts votes: a numeric, empty, date-like or e-mail-like first

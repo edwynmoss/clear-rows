@@ -10,6 +10,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use super::parser::CsvUtf8Parser;
+use super::types::{detect_column_type, parse_datetime, parse_number, DateOrder};
 use super::scan::{field_bytes, BlockIndex, FileMap, RowScanner};
 use super::CsvError;
 use rayon::prelude::*;
@@ -25,12 +26,6 @@ const KEYS_PER_CHUNK: usize = 250_000;
 /// thousand rows changes the verdict only at the margins and adds noticeable
 /// latency to short sorts.
 const SAMPLE_ROWS_FOR_MODE: usize = 2_000;
-
-/// Fraction of non-empty samples that must parse as f64 for us to treat the
-/// column as numeric. Below this we fall back to text ordering so a single
-/// stray "n/a" row in a numeric column still sorts numerically, while a
-/// mostly-text column with a few embedded numbers stays in lex order.
-const NUMERIC_RATIO_THRESHOLD: f64 = 0.8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -48,6 +43,7 @@ pub struct SortKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SortMode {
     Numeric,
+    Date(DateOrder),
     Text,
 }
 
@@ -250,47 +246,28 @@ fn detect_mode(
     parser.try_skip_row()?; // header
 
     let mut sampled = 0;
-    let mut numeric = 0;
-    let mut non_empty = 0;
-
+    let mut values: Vec<String> = Vec::with_capacity(SAMPLE_ROWS_FOR_MODE);
     while sampled < SAMPLE_ROWS_FOR_MODE {
         let row = match parser.try_read_row()? {
             Some(row) => row,
             None => break,
         };
-
-        let value = row
-            .get(column)
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty());
-        if let Some(value) = value {
-            non_empty += 1;
-            if parse_number(value).is_some() {
-                numeric += 1;
-            }
+        if let Some(value) = row.get(column) {
+            values.push(value.clone());
         }
         sampled += 1;
     }
 
-    if non_empty == 0 {
-        return Ok(SortMode::Text);
-    }
-
-    if (numeric as f64) / (non_empty as f64) >= NUMERIC_RATIO_THRESHOLD {
-        Ok(SortMode::Numeric)
+    let profile = detect_column_type(values.iter().map(String::as_str));
+    Ok(if profile.kind.is_numeric() {
+        SortMode::Numeric
+    } else if profile.kind.is_temporal() {
+        SortMode::Date(profile.date_order)
     } else {
-        Ok(SortMode::Text)
-    }
+        SortMode::Text
+    })
 }
 
-fn parse_number(s: &str) -> Option<f64> {
-    let v: f64 = s.parse().ok()?;
-    if v.is_nan() {
-        None
-    } else {
-        Some(v)
-    }
-}
 
 /// Convert an f64 to a u64 whose unsigned big-endian byte order matches the
 /// original numeric ordering (including sign). Negatives invert all bits;
@@ -321,6 +298,23 @@ fn encode_key(raw: &str, mode: SortMode) -> Vec<u8> {
         SortMode::Numeric => match parse_number(trimmed) {
             Some(n) => {
                 let bits = f64_to_sortable_u64(n).to_be_bytes();
+                let mut out = Vec::with_capacity(9);
+                out.push(0x00);
+                out.extend_from_slice(&bits);
+                out
+            }
+            None => {
+                let lower = trimmed.to_ascii_lowercase();
+                let mut out = Vec::with_capacity(1 + lower.len());
+                out.push(0x80);
+                out.extend_from_slice(lower.as_bytes());
+                out
+            }
+        },
+        SortMode::Date(order) => match parse_datetime(trimmed, order) {
+            Some(millis) => {
+                // Flip the sign bit so big-endian byte order matches i64 order.
+                let bits = ((millis as u64) ^ (1u64 << 63)).to_be_bytes();
                 let mut out = Vec::with_capacity(9);
                 out.push(0x00);
                 out.extend_from_slice(&bits);
@@ -581,6 +575,18 @@ mod tests {
         // alpha, Bravo, Charlie (case-insensitive)
         assert_eq!(perm, vec![1, 2, 0]);
 
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn sorts_dates_by_time_not_text() {
+        let path = write_fixture(
+            "sort_dates.csv",
+            "id,when\n1,01/12/2026\n2,2 Jan 2026\n3,2026-03-15T10:00:00\n4,\n5,not a date\n6,2026-01-01\n7,15/06/2026\n",
+        );
+        let perm = run_build(&path, single(1, SortDirection::Asc), b',');
+        // Jan 1 < Jan 2 < Mar 15 < Jun 15 < Dec 1; stray text after real dates; empty last.
+        assert_eq!(perm, vec![5, 1, 2, 6, 0, 4, 3]);
         let _ = fs::remove_file(path);
     }
 

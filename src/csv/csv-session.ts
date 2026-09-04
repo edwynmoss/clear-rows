@@ -1,3 +1,4 @@
+import type { ColumnProfile } from "./column-types";
 import type {
   CsvFileProfile,
   IndexStatus,
@@ -27,6 +28,7 @@ export class CsvSession {
   path: string | null = null;
   profile: CsvFileProfile | null = null;
   headers: string[] = [];
+  columnTypes: ColumnProfile[] = [];
   /** Rows currently available from the Rust indexer. */
   rowCount = 0;
   /**
@@ -60,6 +62,7 @@ export class CsvSession {
     this.path = summary.path;
     this.profile = summary.profile;
     this.headers = summary.headers;
+    this.columnTypes = summary.column_types ?? [];
     this.rowCount = summary.row_count;
     this.scrollRowCount = summary.row_count;
     this.colWidths = summary.headers.map(() => colWidthPx);

@@ -277,7 +277,7 @@ async fn start_csv_sort(
             .ok_or_else(|| csv::CsvError::NoDocument.to_string())?;
 
         if !document.is_indexing_complete() {
-            return Err("Indexing in progress — wait for it to finish before sorting.".to_owned());
+            return Err("Indexing is still running. Wait for it to finish before sorting.".to_owned());
         }
 
         let headers_len = document.summarize().headers.len();
@@ -408,7 +408,7 @@ async fn start_csv_filter(
             .ok_or_else(|| csv::CsvError::NoDocument.to_string())?;
 
         if !document.is_indexing_complete() {
-            return Err("Indexing in progress — wait for it to finish before filtering.".to_owned());
+            return Err("Indexing is still running. Wait for it to finish before filtering.".to_owned());
         }
 
         FilterStartParams {
@@ -521,7 +521,7 @@ async fn start_csv_export(
             .ok_or_else(|| csv::CsvError::NoDocument.to_string())?;
 
         if !document.is_indexing_complete() {
-            return Err("Indexing in progress — wait for it to finish before exporting.".to_owned());
+            return Err("Indexing is still running. Wait for it to finish before exporting.".to_owned());
         }
 
         let all_headers = document.summarize().headers;

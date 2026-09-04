@@ -10,6 +10,8 @@ export type GridRowOptions = {
   rowHeightPx: number;
   gutterWidthPx: number;
   highlightedCell?: { rowIndex: number; columnIndex: number } | null;
+  /** Detected type per column ("integer", "date", ...) for alignment. */
+  columnTypes?: string[];
   /** Placeholder row while indexing catches up. */
   skeleton?: boolean;
 };
@@ -70,6 +72,8 @@ export function updateGridRow(rowEl: HTMLDivElement, options: GridRowOptions): v
     cell.setAttribute("aria-colindex", String(columnIndex + 1));
     cell.dataset.columnIndex = String(columnIndex);
     cell.toggleAttribute("aria-selected", isHighlightedCell);
+    const type = options.columnTypes?.[columnIndex] ?? "";
+    if (cell.dataset.type !== type) cell.dataset.type = type;
 
     if (options.skeleton) {
       if (!cell.firstElementChild || cell.firstElementChild.tagName !== "I") {
