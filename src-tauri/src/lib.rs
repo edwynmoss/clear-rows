@@ -36,6 +36,42 @@ pub struct AppState {
     filter_state: Arc<Mutex<FilterState>>,
     export_generation: Arc<AtomicU64>,
     export_state: Arc<Mutex<ExportState>>,
+    /// Cached composition of the active filter mask over the active sort
+    /// permutation (visible order -> physical data index). Keyed by pointer
+    /// identity of the two inputs, so it is rebuilt only when either changes.
+    composed_view: Arc<Mutex<Option<ComposedView>>>,
+}
+
+struct ComposedView {
+    mask: Arc<Vec<u64>>,
+    perm: Arc<Vec<u64>>,
+    visible: Arc<Vec<u64>>,
+}
+
+/// Visible-order physical indices for a filter mask applied over a sort
+/// permutation, computed once and shared until either input changes.
+fn composed_visible(
+    cache: &Mutex<Option<ComposedView>>,
+    mask: &Arc<Vec<u64>>,
+    perm: &Arc<Vec<u64>>,
+) -> Arc<Vec<u64>> {
+    if let Some(entry) = cache.lock().as_ref() {
+        if Arc::ptr_eq(&entry.mask, mask) && Arc::ptr_eq(&entry.perm, perm) {
+            return Arc::clone(&entry.visible);
+        }
+    }
+    let visible: Vec<u64> = perm
+        .iter()
+        .copied()
+        .filter(|phys| mask.binary_search(phys).is_ok())
+        .collect();
+    let visible = Arc::new(visible);
+    *cache.lock() = Some(ComposedView {
+        mask: Arc::clone(mask),
+        perm: Arc::clone(perm),
+        visible: Arc::clone(&visible),
+    });
+    visible
 }
 
 #[tauri::command]
@@ -43,6 +79,7 @@ async fn open_csv(
     path: String,
     delimiter_override: Option<String>,
     encoding_override: Option<String>,
+    header_override: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<OpenSummary, String> {
     let document_state = Arc::clone(&state.document);
@@ -55,6 +92,7 @@ async fn open_csv(
             .and_then(|value| value.chars().next())
             .and_then(|c| u8::try_from(c as u32).ok()),
         encoding_override,
+        header_override,
     };
 
     let (document, summary) = tauri::async_runtime::spawn_blocking(move || {
@@ -93,15 +131,23 @@ async fn get_csv_rows(
     let document_state = Arc::clone(&state.document);
     let sort_state = Arc::clone(&state.sort_state);
     let filter_state = Arc::clone(&state.filter_state);
+    let composed_cache = Arc::clone(&state.composed_view);
 
     tauri::async_runtime::spawn_blocking(move || {
-        // Snapshot filter mask and sort permutation up front so we don't
-        // hold either lock while reading the document.
-        let filter_mask: Option<Vec<u64>> = filter_state.lock().mask.clone();
-        let sort_perm: Option<Vec<u64>> = sort_state.lock().permutation.clone();
+        // Snapshot filter mask and sort permutation up front (Arc clones, no
+        // copying) so we don't hold either lock while reading the document.
+        let filter_mask: Option<Arc<Vec<u64>>> = filter_state.lock().mask.clone();
+        let sort_perm: Option<Arc<Vec<u64>>> = sort_state.lock().permutation.clone();
 
-        let physical_slice: Option<Vec<u64>> =
-            compose_visible_slice(filter_mask, sort_perm, start, count);
+        let physical_slice: Option<Vec<u64>> = match (filter_mask, sort_perm) {
+            (None, None) => None,
+            (None, Some(perm)) => Some(slice_into(&perm, start, count)),
+            (Some(mask), None) => Some(slice_into(&mask, start, count)),
+            (Some(mask), Some(perm)) => {
+                let visible = composed_visible(&composed_cache, &mask, &perm);
+                Some(slice_into(&visible, start, count))
+            }
+        };
 
         let mut guard = document_state.lock();
         let document = guard
@@ -121,23 +167,6 @@ async fn get_csv_rows(
     .map_err(|err| err.to_string())?
 }
 
-/// Resolve the requested page of *visible* rows to a slice of physical row
-/// indices, given the active filter and sort. Returns `None` when no filter
-/// or sort is active (caller falls back to physical-row reads).
-fn compose_visible_slice(
-    filter_mask: Option<Vec<u64>>,
-    sort_perm: Option<Vec<u64>>,
-    start: u64,
-    count: usize,
-) -> Option<Vec<u64>> {
-    match (filter_mask, sort_perm) {
-        (None, None) => None,
-        (None, Some(perm)) => Some(slice_into(&perm, start, count)),
-        (Some(mask), None) => Some(slice_into(&mask, start, count)),
-        (Some(mask), Some(perm)) => Some(compose_filter_over_sort(&mask, &perm, start, count)),
-    }
-}
-
 fn slice_into(source: &[u64], start: u64, count: usize) -> Vec<u64> {
     let start_usize = usize::try_from(start).unwrap_or(usize::MAX);
     if start_usize >= source.len() {
@@ -145,28 +174,6 @@ fn slice_into(source: &[u64], start: u64, count: usize) -> Vec<u64> {
     }
     let end = start_usize.saturating_add(count).min(source.len());
     source[start_usize..end].to_vec()
-}
-
-/// Walk `sort_perm` in sorted order, keeping only entries whose physical
-/// index is in `mask`, and return the `[start..start+count)` window. `mask`
-/// must be sorted ascending (it always is — the filter scanner appends rows
-/// in physical order).
-fn compose_filter_over_sort(mask: &[u64], sort_perm: &[u64], start: u64, count: usize) -> Vec<u64> {
-    let mut out = Vec::with_capacity(count);
-    let mut visible_idx: u64 = 0;
-    for &phys in sort_perm.iter() {
-        if mask.binary_search(&phys).is_err() {
-            continue;
-        }
-        if visible_idx >= start {
-            out.push(phys);
-            if out.len() == count {
-                break;
-            }
-        }
-        visible_idx += 1;
-    }
-    out
 }
 
 #[tauri::command]
@@ -285,6 +292,7 @@ async fn start_csv_sort(
             data_start: document.read_data_start(),
             delimiter: document.delimiter(),
             total_rows: document.data_row_count(),
+            blocks: document.block_index(),
         }
     };
 
@@ -312,6 +320,7 @@ async fn start_csv_sort(
         data_start: prepared.data_start,
         delimiter: prepared.delimiter,
         keys,
+        blocks: Some(prepared.blocks),
         spill_dir,
         generation,
         generation_state: Arc::clone(&sort_generation),
@@ -360,6 +369,7 @@ struct SortStartParams {
     data_start: u64,
     delimiter: u8,
     total_rows: u64,
+    blocks: csv::scan::BlockIndex,
 }
 
 struct FilterStartParams {
@@ -367,6 +377,8 @@ struct FilterStartParams {
     data_start: u64,
     delimiter: u8,
     total_rows: u64,
+    headers: Vec<String>,
+    blocks: csv::scan::BlockIndex,
 }
 
 #[tauri::command]
@@ -404,6 +416,8 @@ async fn start_csv_filter(
             data_start: document.read_data_start(),
             delimiter: document.delimiter(),
             total_rows: document.data_row_count(),
+            headers: document.summarize().headers,
+            blocks: document.block_index(),
         }
     };
 
@@ -427,6 +441,8 @@ async fn start_csv_filter(
         source_path: prepared.source_path,
         data_start: prepared.data_start,
         delimiter: prepared.delimiter,
+        headers: prepared.headers,
+        blocks: Some(prepared.blocks),
         query: trimmed,
         total_rows: prepared.total_rows,
         generation,
@@ -477,12 +493,9 @@ struct ExportStartParams {
     visible_indices: Vec<u64>,
     /// Physical column indices to include in the export, in output order.
     column_indices: Vec<usize>,
+    read_path: PathBuf,
+    blocks: csv::scan::BlockIndex,
 }
-
-/// Maximum rows per `get_rows_at_physical_data_indices` call. The document
-/// caps batches at this size; the export driver hands us chunks of
-/// `EXPORT_CHUNK_ROWS` (>256) so we sub-batch under one document lock.
-const EXPORT_FETCH_BATCH: usize = 256;
 
 #[tauri::command]
 async fn start_csv_export(
@@ -537,18 +550,15 @@ async fn start_csv_export(
 
         // Snapshot filter mask + sort permutation under the same view we'll
         // export. If either changes mid-export the generation bump cancels us.
-        let filter_mask: Option<Vec<u64>> = filter_state.lock().mask.clone();
-        let sort_perm: Option<Vec<u64>> = sort_state.lock().permutation.clone();
+        let filter_mask: Option<Arc<Vec<u64>>> = filter_state.lock().mask.clone();
+        let sort_perm: Option<Arc<Vec<u64>>> = sort_state.lock().permutation.clone();
         let total_rows = document.data_row_count();
 
         let visible_indices = match (filter_mask, sort_perm) {
             (None, None) => (0..total_rows).collect::<Vec<u64>>(),
-            (None, Some(perm)) => perm,
-            (Some(mask), None) => mask,
-            (Some(mask), Some(perm)) => perm
-                .into_iter()
-                .filter(|phys| mask.binary_search(phys).is_ok())
-                .collect(),
+            (None, Some(perm)) => (*perm).clone(),
+            (Some(mask), None) => (*mask).clone(),
+            (Some(mask), Some(perm)) => (*composed_visible(&state.composed_view, &mask, &perm)).clone(),
         };
 
         ExportStartParams {
@@ -557,6 +567,8 @@ async fn start_csv_export(
             delimiter: document.delimiter(),
             visible_indices,
             column_indices: columns,
+            read_path: document.read_path().to_path_buf(),
+            blocks: document.block_index(),
         }
     };
 
@@ -575,7 +587,11 @@ async fn start_csv_export(
         };
     }
 
-    let document_for_fetch = Arc::clone(&document_state);
+    let read_path = prepared.read_path.clone();
+    let blocks = prepared.blocks.clone();
+    let delimiter = prepared.delimiter;
+    let all_visible = prepared.visible_indices.clone();
+    let mut lookup: Option<(csv::scan::FileMap, Vec<u64>, Vec<usize>)> = None;
     let state_for_error = Arc::clone(&export_state);
     let generation_for_error = Arc::clone(&export_generation);
     let column_indices = prepared.column_indices;
@@ -588,31 +604,44 @@ async fn start_csv_export(
         generation,
         generation_state: Arc::clone(&export_generation),
         state: Arc::clone(&export_state),
-        fetch_chunk: move |visible_start: u64, indices: &[u64]| {
-            let mut guard = document_for_fetch.lock();
-            let document = guard.as_mut().ok_or(csv::CsvError::NoDocument)?;
-
+        fetch_chunk: move |_visible_start: u64, indices: &[u64]| {
+            // First call: map the source and resolve the byte offset of every
+            // exported row in one parallel sweep. Rows are then read straight
+            // from the map, so a sorted or filtered export costs one pass
+            // over the file plus the writes, and never touches the document lock.
+            let (map, wanted, offsets) = lookup.get_or_insert_with(|| {
+                let map = csv::scan::FileMap::open(&read_path).expect("export source is readable");
+                let mut wanted = all_visible.clone();
+                wanted.sort_unstable();
+                wanted.dedup();
+                let offsets = csv::scan::row_offsets(map.bytes(), &blocks, delimiter, &wanted);
+                (map, wanted, offsets)
+            });
+            let bytes = map.bytes();
             let mut out: Vec<Vec<String>> = Vec::with_capacity(indices.len());
-            let header_count = document.summarize().headers.len();
-            let mut offset = 0usize;
-            while offset < indices.len() {
-                let end = (offset + EXPORT_FETCH_BATCH).min(indices.len());
-                let sub = &indices[offset..end];
-                let batch = document.get_rows_at_physical_data_indices(
-                    visible_start + offset as u64,
-                    sub,
-                    0,
-                    header_count,
-                )?;
-                // Project each fetched row down to the requested columns.
-                for row in batch.rows {
-                    let mut projected = Vec::with_capacity(column_indices.len());
+            let mut fields = Vec::with_capacity(32);
+            let mut scratch = Vec::new();
+            for &phys in indices {
+                let offset = wanted
+                    .binary_search(&phys)
+                    .ok()
+                    .map(|i| offsets[i])
+                    .unwrap_or(bytes.len());
+                let mut projected = Vec::with_capacity(column_indices.len());
+                let mut scanner = csv::scan::RowScanner::new(bytes, offset, delimiter);
+                if offset < bytes.len() && scanner.next_row(&mut fields) {
                     for &col in &column_indices {
-                        projected.push(row.get(col).cloned().unwrap_or_default());
+                        projected.push(
+                            fields
+                                .get(col)
+                                .map(|f| csv::scan::field_string(bytes, f, &mut scratch))
+                                .unwrap_or_default(),
+                        );
                     }
-                    out.push(projected);
+                } else {
+                    projected.resize(column_indices.len(), String::new());
                 }
-                offset = end;
+                out.push(projected);
             }
             Ok(out)
         },
@@ -665,11 +694,19 @@ fn clear_csv_export(state: State<'_, AppState>) -> ExportStatus {
 
 #[tauri::command]
 fn startup_csv_path() -> Option<String> {
-    std::env::var("CLEAR_ROWS_OPEN_CSV")
-        .or_else(|_| std::env::var("DATAPARSER_OPEN_CSV"))
-        .ok()
-        .map(|path| path.trim().to_owned())
-        .filter(|path| !path.is_empty())
+    // Double-click / "Open with" / `clear-rows file.csv` all arrive as argv[1].
+    let from_args = std::env::args_os()
+        .skip(1)
+        .map(std::path::PathBuf::from)
+        .find(|candidate| candidate.is_file())
+        .map(|path| path.to_string_lossy().into_owned());
+    from_args.or_else(|| {
+        std::env::var("CLEAR_ROWS_OPEN_CSV")
+            .or_else(|_| std::env::var("DATAPARSER_OPEN_CSV"))
+            .ok()
+            .map(|path| path.trim().to_owned())
+            .filter(|path| !path.is_empty())
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -686,6 +723,7 @@ pub fn run() {
             filter_state: Arc::new(Mutex::new(FilterState::idle())),
             export_generation: Arc::new(AtomicU64::new(0)),
             export_state: Arc::new(Mutex::new(ExportState::idle())),
+            composed_view: Arc::new(Mutex::new(None)),
         })
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![

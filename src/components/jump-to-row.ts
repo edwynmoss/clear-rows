@@ -41,12 +41,12 @@ export function createJumpToRow(options: JumpToRowOptions): JumpToRow {
 
   const apply = document.createElement("button");
   apply.type = "button";
-  apply.className = "dp-button dp-button-primary";
+  apply.className = "cr-btn cr-btn-primary";
   apply.textContent = "Go";
 
   const close = document.createElement("button");
   close.type = "button";
-  close.className = "dp-button dp-button-secondary";
+  close.className = "cr-btn cr-btn-secondary";
   close.textContent = "Close";
   close.setAttribute("aria-label", "Close jump-to-row");
 

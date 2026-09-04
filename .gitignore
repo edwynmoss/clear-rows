@@ -25,3 +25,4 @@ Thumbs.db
 
 # Source logo kept locally; app-ready assets live under public/ and src-tauri/icons/.
 /clear_rows_logo_transparent_1024.png
+e2e-output/

@@ -32,6 +32,7 @@ impl<R: Read + Seek> CsvUtf8Parser<R> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn next_byte_offset(&self) -> u64 {
         self.buf_file_start + self.pos as u64
     }

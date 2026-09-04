@@ -159,6 +159,13 @@ fn score_delimiter(sample: &[u8], delimiter: u8) -> CandidateScore {
     }
 }
 
+/// Delimiters that real exports use as record separators. Colon and space
+/// exist for breach dumps and log-ish text; they should not undermine
+/// confidence in a comma file just because timestamps contain colons.
+fn is_common_delimiter(delimiter: u8) -> bool {
+    matches!(delimiter, b',' | b';' | b'\t' | b'|')
+}
+
 fn classify_confidence(best: CandidateScore, runner_up: CandidateScore) -> DelimiterConfidence {
     if best.multi_column_rows == 0 || best.sampled_rows == 0 || best.mode_columns < 2 {
         return DelimiterConfidence::Low;
@@ -166,8 +173,12 @@ fn classify_confidence(best: CandidateScore, runner_up: CandidateScore) -> Delim
 
     let agreement_ratio = best.consistent_rows as f64 / best.sampled_rows as f64;
     let margin = best.score.saturating_sub(runner_up.score);
+    // A rare delimiter (colon in "02:11:37", space in free text) can tie a
+    // common one on consistency; that is not real ambiguity.
+    let runner_up_is_credible =
+        is_common_delimiter(runner_up.delimiter) || !is_common_delimiter(best.delimiter);
 
-    if agreement_ratio >= 0.8 && margin >= 10_000 {
+    if agreement_ratio >= 0.8 && (margin >= 10_000 || !runner_up_is_credible) {
         return DelimiterConfidence::High;
     }
 
@@ -191,6 +202,17 @@ mod tests {
         );
         let detection = detect_delimiter(sample.as_bytes());
         assert_eq!(detection.delimiter, b';');
+        assert_eq!(detection.confidence, DelimiterConfidence::High);
+    }
+
+    #[test]
+    fn timestamps_with_colons_do_not_lower_comma_confidence() {
+        let mut sample = String::from("ts,host,proc\n");
+        for i in 0..40 {
+            sample.push_str(&format!("2026-08-01T02:{:02}:{:02},WS-{:04},svchost.exe\n", i % 60, (i * 7) % 60, i));
+        }
+        let detection = detect_delimiter(sample.as_bytes());
+        assert_eq!(detection.delimiter, b',');
         assert_eq!(detection.confidence, DelimiterConfidence::High);
     }
 

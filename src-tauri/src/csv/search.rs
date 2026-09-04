@@ -1,5 +1,3 @@
-use std::fs::File;
-use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -9,12 +7,19 @@ use std::sync::{
 use serde::Serialize;
 use thiserror::Error;
 
-use super::{profile_csv_path, CsvUtf8Parser};
+use rayon::prelude::*;
+
+use super::document::prepare_utf8_source;
+use super::profile_csv_path;
+use super::scan::{field_bytes, field_string, BlockIndex, Field, FileMap, RowScanner};
 
 const DEFAULT_MAX_MATCHES: usize = 500;
 const MAX_MATCHES: usize = 5_000;
 const VALUE_PREVIEW_BYTES: usize = 512;
-const SEARCH_PROGRESS_ROW_INTERVAL: u64 = 2_048;
+/// Rows per block for the on-the-fly index used to parallelise a file scan.
+const SEARCH_BLOCK_ROWS: u64 = 4_096;
+/// Blocks scanned per parallel batch; progress and cancellation are checked between batches.
+const SEARCH_BLOCKS_PER_BATCH: usize = 32;
 
 #[derive(Clone, Serialize)]
 pub struct CsvSearchSummary {
@@ -236,10 +241,10 @@ impl SearchNeedle {
         self.unicode_lower.is_empty()
     }
 
-    fn matches(&self, value: &str) -> bool {
+    fn matches_bytes(&self, value: &[u8]) -> bool {
         match self.ascii_lower.as_deref() {
-            Some(needle) => contains_ascii_case_insensitive(value.as_bytes(), needle),
-            None => value.to_lowercase().contains(&self.unicode_lower),
+            Some(needle) => contains_ascii_case_insensitive(value, needle),
+            None => String::from_utf8_lossy(value).to_lowercase().contains(&self.unicode_lower),
         }
     }
 }
@@ -262,14 +267,21 @@ fn search_one_file(
         ));
     }
 
-    let mut file = File::open(&path)?;
-    file.seek(SeekFrom::Start(profiled.data_start))?;
+    // Same UTF-8 view the document opener uses, so UTF-16 and legacy-codepage
+    // files are searchable instead of being scanned as raw bytes.
+    let (read_path, read_data_start, _cache_guard) = prepare_utf8_source(&path, &profiled)?;
     let delimiter = profiled.delimiter;
-    let mut parser = CsvUtf8Parser::new(file, delimiter)?;
-    let headers = match parser.try_read_row()? {
-        Some(headers) => headers,
-        None => return Ok(SearchFileOutcome::Complete),
-    };
+    let map = FileMap::open(&read_path)?;
+    let bytes = map.bytes();
+
+    // Header row.
+    let mut header_scanner = RowScanner::new(bytes, read_data_start as usize, delimiter);
+    let mut fields: Vec<Field> = Vec::with_capacity(32);
+    let mut scratch = Vec::new();
+    if !header_scanner.next_row(&mut fields) {
+        return Ok(SearchFileOutcome::Complete);
+    }
+    let headers: Vec<String> = fields.iter().map(|f| field_string(bytes, f, &mut scratch)).collect();
 
     let path_string = path.to_string_lossy().into_owned();
     let file_name = path
@@ -286,59 +298,80 @@ fn search_one_file(
         });
     }
 
-    let mut row_index: u64 = 0;
+    // A quick row-boundary pass gives us blocks to scan in parallel; the
+    // boundary pass itself is memchr-bound and far cheaper than parsing.
+    let index = BlockIndex::build(bytes, read_data_start, delimiter, SEARCH_BLOCK_ROWS);
+    let ranges = index.ranges();
+    let mut rows_scanned: u64 = 0;
 
-    loop {
+    for batch in ranges.chunks(SEARCH_BLOCKS_PER_BATCH) {
         if is_cancelled(generation_state, generation) {
-            progress.current_row = row_index;
+            progress.current_row = rows_scanned;
             progress.matches = matches.len();
             publish_progress(progress.clone());
             return Ok(SearchFileOutcome::Cancelled);
         }
 
-        let Some(row) = parser.try_read_row()? else {
-            progress.current_row = row_index;
-            progress.matches = matches.len();
-            publish_progress(progress.clone());
-            return Ok(SearchFileOutcome::Complete);
-        };
+        let found: Vec<(u64, Vec<CsvSearchMatch>)> = batch
+            .par_iter()
+            .map(|&(_, first_row, start, end)| {
+                let end = end.min(bytes.len());
+                let slice = &bytes[start.min(end)..end];
+                let mut scanner = RowScanner::new(slice, 0, delimiter);
+                let mut fields: Vec<Field> = Vec::with_capacity(32);
+                let mut unescape = Vec::new();
+                let mut hits = Vec::new();
+                let mut phys = first_row;
+                let mut rows = 0u64;
+                while scanner.next_row(&mut fields) {
+                    if phys > 0 {
+                        let mut preview_row: Option<Vec<String>> = None;
+                        for (column_index, field) in fields.iter().enumerate() {
+                            let cell = field_bytes(slice, field, &mut unescape);
+                            if !needle.matches_bytes(cell) {
+                                continue;
+                            }
+                            let row_values = preview_row.get_or_insert_with(|| {
+                                let mut tmp = Vec::new();
+                                fields.iter().map(|f| truncate_preview(field_string(slice, f, &mut tmp))).collect()
+                            });
+                            hits.push(CsvSearchMatch {
+                                path: path_string.clone(),
+                                file_name: file_name.clone(),
+                                row_index: phys,
+                                column_index,
+                                column_name: headers.get(column_index).cloned().unwrap_or_default(),
+                                value: truncate_preview(String::from_utf8_lossy(cell).into_owned()),
+                                row_values: row_values.clone(),
+                            });
+                        }
+                    }
+                    phys += 1;
+                    rows += 1;
+                }
+                (rows, hits)
+            })
+            .collect();
 
-        row_index += 1;
-
-        let mut preview_row: Option<Vec<String>> = None;
-
-        for (column_index, value) in row.iter().enumerate() {
-            if !needle.matches(&value) {
-                continue;
-            }
-
-            let row_values = preview_row
-                .get_or_insert_with(|| row.iter().cloned().map(truncate_preview).collect());
-
-            matches.push(CsvSearchMatch {
-                path: path_string.clone(),
-                file_name: file_name.clone(),
-                row_index,
-                column_index,
-                column_name: headers.get(column_index).cloned().unwrap_or_default(),
-                value: truncate_preview(value.clone()),
-                row_values: row_values.clone(),
-            });
-
-            if matches.len() >= max_matches {
-                progress.current_row = row_index;
-                progress.matches = matches.len();
-                publish_progress(progress.clone());
-                return Ok(SearchFileOutcome::Truncated);
+        for (rows, hits) in found {
+            rows_scanned += rows;
+            for hit in hits {
+                if matches.len() >= max_matches {
+                    progress.current_row = rows_scanned;
+                    progress.matches = matches.len();
+                    publish_progress(progress.clone());
+                    return Ok(SearchFileOutcome::Truncated);
+                }
+                matches.push(hit);
             }
         }
 
-        if row_index % SEARCH_PROGRESS_ROW_INTERVAL == 0 {
-            progress.current_row = row_index;
-            progress.matches = matches.len();
-            publish_progress(progress.clone());
-        }
+        progress.current_row = rows_scanned;
+        progress.matches = matches.len();
+        publish_progress(progress.clone());
     }
+
+    Ok(SearchFileOutcome::Complete)
 }
 
 fn is_cancelled(generation_state: &AtomicU64, generation: u64) -> bool {

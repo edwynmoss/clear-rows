@@ -5,6 +5,7 @@ import type { ActiveSort } from "../csv/csv-session";
 export type CsvPreviewGridRefs = {
   readonly root: HTMLDivElement;
   readonly headerViewport: HTMLDivElement;
+  readonly gutterHeader: HTMLDivElement;
   readonly headerRow: HTMLDivElement;
   readonly scrollRegion: HTMLDivElement;
   readonly inner: HTMLDivElement;
@@ -15,50 +16,69 @@ export type CsvPreviewGridRefs = {
 
 export type CsvPreviewGridOptions = {
   rowHeightPx?: number;
+  gutterWidthPx?: number;
   gridLabel?: string;
 };
 
 /**
- * Accessible CSV preview shell: sticky column headers + scroll body with spacer slots for virtualization.
+ * Grid shell: a sticky header strip (row-number gutter + horizontally
+ * translated column headers) over a scroll body with spacer slots for
+ * virtualization.
  */
 export function createCsvPreviewGrid(options: CsvPreviewGridOptions = {}): CsvPreviewGridRefs {
+  const gutterWidth = options.gutterWidthPx ?? 52;
+
   const root = document.createElement("div");
-  root.className = "dp-data-surface flex min-h-0 flex-1 flex-col";
+  root.className = "cr-grid";
 
   const headerViewport = document.createElement("div");
-  headerViewport.className = "dp-grid-header shrink-0 overflow-hidden";
+  headerViewport.className = "cr-grid-head";
+
+  const gutterHeader = document.createElement("div");
+  gutterHeader.className = "cr-grid-gutter cr-grid-gutter-head";
+  gutterHeader.style.width = `${gutterWidth}px`;
+  gutterHeader.style.minWidth = `${gutterWidth}px`;
+  gutterHeader.textContent = "#";
+  gutterHeader.setAttribute("aria-hidden", "true");
+
+  const headerClip = document.createElement("div");
+  headerClip.className = "cr-grid-head-clip";
 
   const headerRow = document.createElement("div");
-  headerRow.className = "flex shrink-0 will-change-transform";
+  headerRow.className = "cr-grid-head-row";
+  headerRow.setAttribute("role", "row");
+
+  headerClip.append(headerRow);
+  headerViewport.append(gutterHeader, headerClip);
 
   const scrollRegion = document.createElement("div");
-  scrollRegion.className = "dp-grid-scroll min-h-0 flex-1 overflow-auto outline-none";
+  scrollRegion.className = "cr-grid-scroll";
   scrollRegion.tabIndex = 0;
   scrollRegion.role = "grid";
-  scrollRegion.setAttribute("aria-label", options.gridLabel ?? "CSV rows");
+  scrollRegion.setAttribute("aria-label", options.gridLabel ?? "Rows");
   scrollRegion.setAttribute("aria-rowcount", "0");
   scrollRegion.setAttribute("aria-colcount", "0");
 
   const inner = document.createElement("div");
-  inner.className = "inline-block min-w-full";
+  inner.className = "cr-grid-inner";
 
   const spacerTop = document.createElement("div");
   spacerTop.style.height = "0px";
 
   const windowRows = document.createElement("div");
-  windowRows.className = "flex flex-col";
+  windowRows.className = "cr-grid-rows";
 
   const spacerBottom = document.createElement("div");
   spacerBottom.style.height = "0px";
 
   inner.append(spacerTop, windowRows, spacerBottom);
   scrollRegion.append(inner);
-  headerViewport.append(headerRow);
   root.append(headerViewport, scrollRegion);
 
   return {
     root,
     headerViewport,
+    gutterHeader,
     headerRow,
     scrollRegion,
     inner,
@@ -69,14 +89,11 @@ export function createCsvPreviewGrid(options: CsvPreviewGridOptions = {}): CsvPr
 }
 
 export type RenderHeaderOptions = {
-  /**
-   * Active sort keys in priority order. The header for each referenced column
-   * gets an arrow indicator and, when more than one key is present, a small
-   * priority badge so users can tell primary from secondary at a glance.
-   */
   activeSort?: ActiveSort;
-  /** Column whose sort is currently being computed. Rendered with a busy hint. */
   pendingSortColumn?: number | null;
+  onResizeStart?: (columnIndex: number, event: PointerEvent) => void;
+  onResizeReset?: (columnIndex: number) => void;
+  onMenu?: (columnIndex: number, anchor: HTMLElement) => void;
 };
 
 export function renderCsvHeaderRow(
@@ -84,83 +101,88 @@ export function renderCsvHeaderRow(
   headers: string[],
   colWidthsPx: number[],
   rowHeightPx: number,
-  columnWindow: CsvColumnWindow = {
-    start: 0,
-    end: headers.length,
-    leftOffsetPx: 0,
-    rightOffsetPx: 0,
-    totalWidthPx: headers.reduce(
-      (sum, _header, index) => sum + (colWidthsPx[index] ?? CSV_DEFAULT_COL_WIDTH_PX),
-      0,
-    ),
-  },
+  columnWindow: CsvColumnWindow,
   options: RenderHeaderOptions = {},
 ): void {
   headerRow.replaceChildren();
   headerRow.style.width = `${columnWindow.totalWidthPx}px`;
-
   headerRow.append(createHeaderSpacer(columnWindow.leftOffsetPx));
 
   for (let i = columnWindow.start; i < columnWindow.end; i++) {
     const w = colWidthsPx[i] ?? CSV_DEFAULT_COL_WIDTH_PX;
-    if (w <= 0) {
-      // Hidden columns fold to zero width; don't emit a header cell.
-      continue;
-    }
+    if (w <= 0) continue;
 
     const cell = document.createElement("div");
     cell.role = "columnheader";
     cell.setAttribute("aria-colindex", String(i + 1));
-    cell.className = "dp-grid-header-cell";
+    cell.className = "cr-col";
     cell.dataset.columnIndex = String(i);
     cell.style.width = `${w}px`;
     cell.style.minWidth = `${w}px`;
     cell.style.height = `${rowHeightPx}px`;
+    cell.title = headers[i] ?? "";
 
     const label = document.createElement("span");
-    label.className = "dp-grid-header-label";
-    label.textContent = headers[i] ?? "";
+    label.className = "cr-col-label";
+    label.textContent = headers[i] || `Column ${i + 1}`;
     cell.append(label);
 
     const isPending = options.pendingSortColumn === i;
     const sortKeys = options.activeSort ?? [];
-    const sortKeyIndex = isPending
-      ? -1
-      : sortKeys.findIndex((key) => key.column === i);
+    const sortKeyIndex = isPending ? -1 : sortKeys.findIndex((key) => key.column === i);
     const direction = sortKeyIndex >= 0 ? sortKeys[sortKeyIndex].direction : null;
-    const showPriority = !isPending && sortKeys.length > 1 && sortKeyIndex >= 0;
 
     if (isPending || direction !== null) {
       const indicator = document.createElement("span");
-      indicator.className = "dp-grid-header-sort";
+      indicator.className = "cr-col-sort";
       indicator.setAttribute("aria-hidden", "true");
       if (isPending) {
         indicator.dataset.state = "pending";
         indicator.textContent = "…";
       } else {
         indicator.dataset.state = direction ?? "";
-        indicator.textContent = direction === "asc" ? "▲" : "▼";
+        indicator.textContent = direction === "asc" ? "↑" : "↓";
+        if (sortKeys.length > 1) {
+          const badge = document.createElement("sup");
+          badge.textContent = String(sortKeyIndex + 1);
+          indicator.append(badge);
+        }
       }
       cell.append(indicator);
-
-      if (showPriority) {
-        const badge = document.createElement("span");
-        badge.className = "dp-grid-header-sort-priority";
-        badge.setAttribute("aria-hidden", "true");
-        badge.textContent = String(sortKeyIndex + 1);
-        cell.append(badge);
-      }
     }
 
-    if (isPending) {
-      cell.setAttribute("aria-sort", "other");
-    } else if (direction === "asc") {
-      cell.setAttribute("aria-sort", "ascending");
-    } else if (direction === "desc") {
-      cell.setAttribute("aria-sort", "descending");
-    } else {
-      cell.setAttribute("aria-sort", "none");
+    if (options.onMenu) {
+      const menu = document.createElement("button");
+      menu.type = "button";
+      menu.className = "cr-col-menu";
+      menu.setAttribute("aria-label", `Column options for ${headers[i] || `column ${i + 1}`}`);
+      menu.textContent = "⋯";
+      menu.addEventListener("click", (event) => {
+        event.stopPropagation();
+        options.onMenu?.(i, menu);
+      });
+      cell.append(menu);
     }
+
+    const handle = document.createElement("div");
+    handle.className = "cr-col-resize";
+    handle.setAttribute("aria-hidden", "true");
+    handle.addEventListener("pointerdown", (event) => {
+      event.stopPropagation();
+      event.preventDefault();
+      options.onResizeStart?.(i, event);
+    });
+    handle.addEventListener("dblclick", (event) => {
+      event.stopPropagation();
+      options.onResizeReset?.(i);
+    });
+    handle.addEventListener("click", (event) => event.stopPropagation());
+    cell.append(handle);
+
+    cell.setAttribute(
+      "aria-sort",
+      isPending ? "other" : direction === "asc" ? "ascending" : direction === "desc" ? "descending" : "none",
+    );
 
     headerRow.append(cell);
   }
@@ -170,7 +192,7 @@ export function renderCsvHeaderRow(
 
 function createHeaderSpacer(widthPx: number): HTMLDivElement {
   const spacer = document.createElement("div");
-  spacer.className = "shrink-0";
+  spacer.className = "cr-spacer-cell";
   spacer.setAttribute("aria-hidden", "true");
   spacer.style.width = `${widthPx}px`;
   spacer.style.minWidth = `${widthPx}px`;

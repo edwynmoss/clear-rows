@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Clear Rows",
-  "version": "0.9.0",
+  "version": "1.0.0",
   "identifier": "app.clearrows.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -14,10 +14,12 @@
       {
         "label": "main",
         "title": "Clear Rows",
-        "width": 1120,
-        "height": 720,
+        "width": 1280,
+        "height": 800,
         "resizable": true,
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,SmoothScrolling,WindowsScrollingPersonality --disable-smooth-scrolling --disable-threaded-scrolling"
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,SmoothScrolling,WindowsScrollingPersonality --disable-smooth-scrolling --disable-threaded-scrolling",
+        "minWidth": 880,
+        "minHeight": 560
       }
     ],
     "security": {
@@ -26,14 +28,54 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "nsis",
+      "msi"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "fileAssociations": [
+      {
+        "ext": [
+          "csv"
+        ],
+        "name": "CSV file",
+        "description": "Comma-separated values",
+        "role": "Viewer",
+        "mimeType": "text/csv"
+      },
+      {
+        "ext": [
+          "tsv"
+        ],
+        "name": "TSV file",
+        "description": "Tab-separated values",
+        "role": "Viewer",
+        "mimeType": "text/tab-separated-values"
+      }
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "installer/header.bmp",
+        "sidebarImage": "installer/sidebar.bmp",
+        "installerHooks": "installer/hooks.nsh",
+        "installMode": "currentUser",
+        "compression": "lzma",
+        "startMenuFolder": "Clear Rows"
+      },
+      "wix": {
+        "bannerPath": "installer/wix-banner.bmp",
+        "dialogImagePath": "installer/wix-dialog.bmp"
+      }
+    },
+    "shortDescription": "Open large CSV files instantly",
+    "longDescription": "Clear Rows opens multi-gigabyte CSV and TSV files in a second, with filtering, sorting, cross-file search and export."
   },
   "plugins": {}
 }

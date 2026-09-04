@@ -5,18 +5,21 @@ use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use encoding_rs::{UTF_16BE, UTF_16LE};
 use encoding_rs_io::DecodeReaderBytesBuilder;
 use serde::Serialize;
 use thiserror::Error;
 
-use super::profile::{delimiter_label, Encoding, ProfiledCsvFile};
+use super::header::{detect_header, synthetic_headers, HeaderMode, HEADER_SAMPLE_ROWS};
+use super::profile::{delimiter_label, Encoding, EncodingSource, ProfiledCsvFile};
+use super::scan::{BlockIndex, FileMap, RowScanner};
 use super::{profile_csv_path, CsvFileProfile, CsvUtf8Parser};
 
 #[derive(Default)]
 pub struct OpenOptions {
     pub delimiter_override: Option<u8>,
     pub encoding_override: Option<String>,
+    /// "header", "data" or None/"auto" (decide from the first rows).
+    pub header_override: Option<String>,
 }
 
 /// Physical rows between byte-offset checkpoints for random access.
@@ -42,6 +45,9 @@ pub enum CsvError {
 
     #[error("Unsupported file: {0}")]
     UnsupportedFile(String),
+
+    #[error("{0}")]
+    InvalidQuery(String),
 }
 
 #[derive(Clone, Serialize)]
@@ -78,7 +84,7 @@ pub struct CsvDocument {
     path: PathBuf,
     /// Path the parser/indexer/sort actually reads from. For UTF-8 sources this
     /// equals `path`; for UTF-16 sources it points at the transcoded UTF-8
-    /// cache file held alive by `cache_guard`.
+    /// cache file held alive by `cache_guards`.
     read_path: PathBuf,
     /// Byte offset within `read_path` where the CSV data (header row) starts.
     read_data_start: u64,
@@ -93,16 +99,62 @@ pub struct CsvDocument {
     is_complete: bool,
     index_error: Option<String>,
     parser: CsvUtf8Parser<File>,
-    indexer: Option<CsvUtf8Parser<File>>,
+    /// Physical row number the random-access parser is positioned before,
+    /// when known. Lets ascending reads (filtered views, exports) skip
+    /// forward instead of re-seeking to a block checkpoint every row.
+    parser_row: Option<u64>,
+    /// Read-only map of `read_path` for random-access reads (sorted and
+    /// filtered views), which are far cheaper over a map than through the
+    /// buffered parser's seek-and-skip.
+    map: FileMap,
+    indexer: Option<FastIndexer>,
     // Must be the last field: declaration order is drop order, so the cache
     // file is removed only after `parser` and `indexer` have released their
     // File handles (Windows refuses removal while handles are open).
     // Held for its Drop side-effect; not read in release builds.
     #[allow(dead_code)]
-    cache_guard: Option<CacheGuard>,
+    cache_guards: Vec<CacheGuard>,
 }
 
-struct CacheGuard {
+/// Memory-mapped forward-only row walker used to build the block index.
+struct FastIndexer {
+    map: FileMap,
+    pos: usize,
+    delimiter: u8,
+}
+
+impl FastIndexer {
+    fn open(path: &Path, start: u64, delimiter: u8) -> std::io::Result<Self> {
+        let map = FileMap::open(path)?;
+        let pos = (start as usize).min(map.bytes().len());
+        Ok(Self { map, pos, delimiter })
+    }
+
+    fn position(&self) -> u64 {
+        self.pos as u64
+    }
+
+    fn skip_row(&mut self) -> bool {
+        let mut scanner = RowScanner::new(self.map.bytes(), self.pos, self.delimiter);
+        let advanced = scanner.skip_row();
+        self.pos = scanner.position();
+        advanced
+    }
+
+    fn read_row(&mut self) -> Option<Vec<String>> {
+        let bytes = self.map.bytes();
+        let mut scanner = RowScanner::new(bytes, self.pos, self.delimiter);
+        let mut fields = Vec::new();
+        if !scanner.next_row(&mut fields) {
+            return None;
+        }
+        self.pos = scanner.position();
+        let mut scratch = Vec::new();
+        Some(fields.iter().map(|f| super::scan::field_string(bytes, f, &mut scratch)).collect())
+    }
+}
+
+pub(crate) struct CacheGuard {
     path: PathBuf,
 }
 
@@ -110,6 +162,24 @@ impl Drop for CacheGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// Resolve where the UTF-8 bytes for a profiled file live. Native UTF-8 files
+/// are read in place (skipping any BOM); everything else is transcoded once
+/// into a temp cache file that lives as long as the returned guard. Shared by
+/// the document opener and the multi-file search so both see the same text.
+pub(crate) fn prepare_utf8_source(
+    path: &Path,
+    profiled: &ProfiledCsvFile,
+) -> std::io::Result<(PathBuf, u64, Option<CacheGuard>)> {
+    if profiled.encoding.is_native_utf8() {
+        return Ok((path.to_path_buf(), profiled.data_start, None));
+    }
+    let cache = transcode_to_utf8_cache(path, profiled.encoding)?;
+    let guard = CacheGuard {
+        path: cache.clone(),
+    };
+    Ok((cache, 0, Some(guard)))
 }
 
 impl CsvDocument {
@@ -151,26 +221,36 @@ impl CsvDocument {
             ));
         }
 
-        let (read_path, read_data_start, cache_guard) = match profiled.encoding {
-            Encoding::Utf16Le | Encoding::Utf16Be => {
-                let cache = transcode_to_utf8_cache(&path, profiled.encoding)?;
-                let guard = CacheGuard {
-                    path: cache.clone(),
-                };
-                (cache, 0u64, Some(guard))
-            }
-            Encoding::Utf8 | Encoding::Utf8Bom => (path.clone(), profiled.data_start, None),
+        let (mut read_path, mut read_data_start, cache_guard) = prepare_utf8_source(&path, &profiled)?;
+        let mut cache_guards: Vec<CacheGuard> = cache_guard.into_iter().collect();
+
+        // First row: column names or data? Files without a header get a
+        // working copy with generated names prepended, so every reader keeps
+        // its "row 0 is the header" model.
+        let mode = HeaderMode::from_label(options.header_override.as_deref());
+        let sample = sample_rows(&read_path, read_data_start, profiled.delimiter, HEADER_SAMPLE_ROWS)?;
+        let has_header = match mode {
+            HeaderMode::Present => true,
+            HeaderMode::Absent => false,
+            HeaderMode::Auto => detect_header(&sample),
         };
+        profiled.profile.has_header = has_header;
+        profiled.profile.header_source = if mode == HeaderMode::Auto { "detected" } else { "user" }.to_owned();
+        if !has_header {
+            let width = sample.iter().map(Vec::len).max().unwrap_or(1).max(1);
+            let (cache, guard) = write_headerless_cache(&read_path, read_data_start, profiled.delimiter, width)?;
+            cache_guards.push(guard);
+            read_path = cache;
+            read_data_start = 0;
+        }
 
         // file_size is the indexer's denominator; for UTF-16 the indexer streams
         // the transcoded cache, so measure it (not the source) to keep progress
         // (indexed_bytes / file_size) meaningful in both cases.
         let file_size = read_path.metadata()?.len();
 
-        let mut index_file = File::open(&read_path)?;
-        index_file.seek(SeekFrom::Start(read_data_start))?;
         let delimiter = profiled.delimiter;
-        let mut indexer = CsvUtf8Parser::new(index_file, delimiter)?;
+        let mut indexer = FastIndexer::open(&read_path, read_data_start, delimiter)?;
 
         let mut block_starts: Vec<u64> = Vec::new();
         let mut row_index: u64 = 0;
@@ -178,12 +258,12 @@ impl CsvDocument {
         let mut is_complete = false;
         let indexed_bytes;
 
-        block_starts.push(indexer.next_byte_offset());
-        match indexer.try_read_row()? {
+        block_starts.push(indexer.position());
+        match indexer.read_row() {
             Some(fields) => {
                 headers = fields;
                 row_index += 1;
-                indexed_bytes = indexer.next_byte_offset();
+                indexed_bytes = indexer.position();
             }
             None => {
                 is_complete = true;
@@ -194,6 +274,7 @@ impl CsvDocument {
         let mut access_file = File::open(&read_path)?;
         access_file.seek(SeekFrom::Start(read_data_start))?;
         let parser = CsvUtf8Parser::new(access_file, delimiter)?;
+        let map = FileMap::open(&read_path)?;
 
         let mut document = Self {
             path,
@@ -210,8 +291,10 @@ impl CsvDocument {
             is_complete,
             index_error: None,
             parser,
+            parser_row: None,
+            map,
             indexer: if is_complete { None } else { Some(indexer) },
-            cache_guard,
+            cache_guards,
         };
 
         document.index_next_chunk(initial_data_rows)?;
@@ -259,6 +342,21 @@ impl CsvDocument {
         self.read_data_start
     }
 
+    /// Snapshot of the row index for parallel scans. Only rows indexed so far
+    /// are covered; callers should wait for `is_indexing_complete`.
+    pub fn block_index(&self) -> BlockIndex {
+        // A checkpoint is pushed *before* each block is scanned, so a trailing
+        // entry equal to the current end marks an empty block; drop it.
+        let mut starts = self.block_starts.clone();
+        if starts.len() > 1
+            && starts.last().copied() == Some(self.indexed_bytes)
+            && self.physical_rows % self.block_size == 0
+        {
+            starts.pop();
+        }
+        BlockIndex { starts, block_size: self.block_size, end: self.indexed_bytes }
+    }
+
     pub fn is_indexing_complete(&self) -> bool {
         self.is_complete
     }
@@ -290,20 +388,17 @@ impl CsvDocument {
 
         for _ in 0..max_data_rows {
             if self.physical_rows % self.block_size == 0 {
-                self.block_starts.push(indexer.next_byte_offset());
+                self.block_starts.push(indexer.position());
             }
 
-            match indexer.try_skip_row()? {
-                Some(()) => {
-                    self.physical_rows += 1;
-                    self.indexed_bytes = indexer.next_byte_offset().min(self.file_size);
-                }
-                None => {
-                    reached_end = true;
-                    break;
-                }
+            if indexer.skip_row() {
+                self.physical_rows += 1;
+            } else {
+                reached_end = true;
+                break;
             }
         }
+        self.indexed_bytes = indexer.position().min(self.file_size);
 
         if reached_end {
             self.is_complete = true;
@@ -359,7 +454,10 @@ impl CsvDocument {
         for _ in 0..take {
             let row = match self.parser.try_read_row()? {
                 Some(r) => r,
-                None => return Err(CsvError::MissingRow),
+                None => {
+                    self.parser_row = None;
+                    return Err(CsvError::MissingRow);
+                }
             };
 
             rows.push(preview_sliced_row(
@@ -368,6 +466,7 @@ impl CsvDocument {
                 visible_column_count,
             ));
         }
+        self.parser_row = Some(physical_first + take as u64);
 
         Ok(RowBatch {
             start,
@@ -404,6 +503,14 @@ impl CsvDocument {
 
         let max_data = self.data_row_count();
         let mut rows = Vec::with_capacity(physical_indices.len());
+        let bytes = self.map.bytes();
+        let end = (self.indexed_bytes as usize).min(bytes.len());
+        let mut fields = Vec::with_capacity(32);
+        let mut scratch = Vec::new();
+        // Consecutive requests often hit the same block (filtered views are
+        // ascending); remember where the scanner is so we can skip forward
+        // instead of restarting from the checkpoint every time.
+        let mut cursor: Option<(u64, RowScanner)> = None;
 
         for &phys in physical_indices {
             if phys >= max_data {
@@ -416,12 +523,37 @@ impl CsvDocument {
             }
 
             let physical_row = phys.saturating_add(1);
-            self.seek_before_physical_row(physical_row)?;
-
-            let row = match self.parser.try_read_row()? {
-                Some(r) => r,
-                None => return Err(CsvError::MissingRow),
+            let block = (physical_row / self.block_size) as usize;
+            let block_row = block as u64 * self.block_size;
+            let mut scanner = match cursor.take() {
+                Some((at, scanner)) if at <= physical_row && physical_row - at <= physical_row - block_row => {
+                    cursor = Some((at, scanner));
+                    let (at, scanner) = cursor.take().unwrap();
+                    let mut scanner = scanner;
+                    for _ in at..physical_row {
+                        if !scanner.skip_row() {
+                            return Err(CsvError::MissingRow);
+                        }
+                    }
+                    scanner
+                }
+                _ => {
+                    let start = *self.block_starts.get(block).ok_or(CsvError::MissingRow)? as usize;
+                    let mut scanner = RowScanner::new(&bytes[..end], start.min(end), self.delimiter);
+                    for _ in block_row..physical_row {
+                        if !scanner.skip_row() {
+                            return Err(CsvError::MissingRow);
+                        }
+                    }
+                    scanner
+                }
             };
+
+            if !scanner.next_row(&mut fields) {
+                return Err(CsvError::MissingRow);
+            }
+            let row: Vec<String> = fields.iter().map(|f| super::scan::field_string(bytes, f, &mut scratch)).collect();
+            cursor = Some((physical_row + 1, scanner));
 
             rows.push(preview_sliced_row(
                 row,
@@ -439,24 +571,41 @@ impl CsvDocument {
 
     #[cfg(test)]
     fn cache_path(&self) -> Option<PathBuf> {
-        self.cache_guard.as_ref().map(|g| g.path.clone())
+        self.cache_guards.first().map(|g| g.path.clone())
     }
 
     fn seek_before_physical_row(&mut self, physical_row: u64) -> Result<(), CsvError> {
         let block = (physical_row / self.block_size) as usize;
-        let seek = *self.block_starts.get(block).ok_or(CsvError::MissingRow)?;
+        let skip_from_block = physical_row - (physical_row / self.block_size) * self.block_size;
 
-        let skip = physical_row - (physical_row / self.block_size) * self.block_size;
+        // Fast path: the parser already sits at or before the target and is
+        // closer than the block checkpoint would be. Skip forward from here.
+        let mut skip = skip_from_block;
+        let mut needs_seek = true;
+        if let Some(current) = self.parser_row {
+            if current <= physical_row && physical_row - current <= skip_from_block {
+                skip = physical_row - current;
+                needs_seek = false;
+            }
+        }
 
-        self.parser.seek(seek)?;
+        if needs_seek {
+            let seek = *self.block_starts.get(block).ok_or(CsvError::MissingRow)?;
+            self.parser.seek(seek)?;
+            self.parser_row = None;
+        }
 
         for _ in 0..skip {
             match self.parser.try_skip_row()? {
                 Some(()) => {}
-                None => return Err(CsvError::MissingRow),
+                None => {
+                    self.parser_row = None;
+                    return Err(CsvError::MissingRow);
+                }
             }
         }
 
+        self.parser_row = Some(physical_row);
         Ok(())
     }
 }
@@ -493,37 +642,45 @@ fn transcode_to_utf8_cache(source: &Path, encoding: Encoding) -> std::io::Result
 
     sweep_stale_cache_entries(&cache_dir, Duration::from_secs(24 * 60 * 60));
 
-    // Unique-per-call: pid + nanos + source-path hash. Avoids cross-document
-    // races on the same source and removes any need for a `.partial` rename
-    // since no other call competes for this name.
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let mut hasher = DefaultHasher::new();
-    source.hash(&mut hasher);
-    let source_hash = hasher.finish();
-    let cache_path = cache_dir.join(format!(
-        "{}-{:032x}-{:016x}.utf8",
-        std::process::id(),
-        nanos,
-        source_hash
-    ));
+    let cache_path = unique_cache_path(&cache_dir, source, "utf8");
 
-    let charset = match encoding {
-        Encoding::Utf16Le => UTF_16LE,
-        Encoding::Utf16Be => UTF_16BE,
-        _ => unreachable!("transcode_to_utf8_cache called with non-UTF-16 encoding"),
-    };
+    debug_assert!(
+        !encoding.is_native_utf8(),
+        "transcode_to_utf8_cache called for a native UTF-8 source"
+    );
+    let charset = encoding.charset();
+    let cache_file = File::create(&cache_path)?;
 
+    if chunked_transcode_is_safe(charset) {
+        // UTF-16 and single-byte codepages carry no decoder state across a
+        // well-chosen boundary, so the file is decoded in parallel chunks.
+        let map = FileMap::open(source)?;
+        let bytes = map.bytes();
+        // Only UTF-16 sources may carry a BOM we want stripped; legacy codepages
+        // never do, and sniffing there could misfire on a file that happens to
+        // start with 0xFF 0xFE.
+        let bom = match encoding {
+            Encoding::Utf16Le if bytes.starts_with(&[0xFF, 0xFE]) => 2,
+            Encoding::Utf16Be if bytes.starts_with(&[0xFE, 0xFF]) => 2,
+            _ => 0,
+        };
+        let mut writer = BufWriter::with_capacity(1024 * 1024, cache_file);
+        transcode_chunked(&bytes[bom..], charset, TRANSCODE_CHUNK_BYTES, &mut writer)?;
+        writer.flush()?;
+        let cache_file = writer.into_inner().map_err(|e| e.into_error())?;
+        cache_file.sync_all()?;
+        return Ok(cache_path);
+    }
+
+    // Multi-byte legacy codepages (Shift_JIS, GBK, Big5, EUC-KR, ...) keep
+    // state between bytes, so they stream through one decoder.
     let source_file = File::open(source)?;
     let mut decoded = DecodeReaderBytesBuilder::new()
         .encoding(Some(charset))
-        .bom_sniffing(true)
+        .bom_sniffing(false)
         .build(source_file);
     // 256 KiB BufWriter cuts io::copy's syscall count ~32x vs the default
-    // 8 KiB internal buffer; meaningful on large UTF-16 first-opens.
-    let cache_file = File::create(&cache_path)?;
+    // 8 KiB internal buffer.
     let mut writer = BufWriter::with_capacity(256 * 1024, cache_file);
     std::io::copy(&mut decoded, &mut writer)?;
     writer.flush()?;
@@ -532,6 +689,134 @@ fn transcode_to_utf8_cache(source: &Path, encoding: Encoding) -> std::io::Result
     drop(cache_file);
 
     Ok(cache_path)
+}
+
+/// Source bytes decoded per parallel task. Large enough that per-chunk
+/// overhead is noise, small enough that a 16-chunk batch stays around
+/// 128 MB of source in flight.
+const TRANSCODE_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+
+/// Chunks decoded before their output is written, bounding memory.
+const TRANSCODE_BATCH_CHUNKS: usize = 16;
+
+fn chunked_transcode_is_safe(charset: &'static encoding_rs::Encoding) -> bool {
+    charset == encoding_rs::UTF_16LE || charset == encoding_rs::UTF_16BE || charset.is_single_byte()
+}
+
+/// Decode `body` (BOM already removed) to UTF-8 in parallel chunks, writing
+/// the pieces to `out` in order. Chunk boundaries are chosen so no decoder
+/// state crosses them: even offsets that do not split a UTF-16 surrogate
+/// pair, or anywhere for single-byte codepages. Invalid sequences become
+/// U+FFFD exactly as the streaming decoder would produce.
+pub(crate) fn transcode_chunked(
+    body: &[u8],
+    charset: &'static encoding_rs::Encoding,
+    chunk_bytes: usize,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
+    use rayon::prelude::*;
+
+    let utf16 = charset == encoding_rs::UTF_16LE || charset == encoding_rs::UTF_16BE;
+    let little_endian = charset == encoding_rs::UTF_16LE;
+    let chunk_bytes = chunk_bytes.max(4);
+
+    let mut bounds = vec![0usize];
+    let mut position = 0usize;
+    while position < body.len() {
+        let mut next = position.saturating_add(chunk_bytes).min(body.len());
+        if utf16 && next < body.len() {
+            next -= next % 2;
+            // A high surrogate right before the cut belongs with the low
+            // surrogate after it; move the cut in front of the pair.
+            if next >= 2 {
+                let unit = if little_endian {
+                    u16::from_le_bytes([body[next - 2], body[next - 1]])
+                } else {
+                    u16::from_be_bytes([body[next - 2], body[next - 1]])
+                };
+                if (0xD800..0xDC00).contains(&unit) {
+                    next -= 2;
+                }
+            }
+        }
+        if next <= position {
+            next = body.len();
+        }
+        bounds.push(next);
+        position = next;
+    }
+
+    let ranges: Vec<(usize, usize)> = bounds.windows(2).map(|w| (w[0], w[1])).collect();
+    for batch in ranges.chunks(TRANSCODE_BATCH_CHUNKS) {
+        let pieces: Vec<std::borrow::Cow<'_, str>> = batch
+            .par_iter()
+            .map(|&(start, end)| charset.decode_without_bom_handling(&body[start..end]).0)
+            .collect();
+        for piece in pieces {
+            out.write_all(piece.as_bytes())?;
+        }
+    }
+    Ok(())
+}
+
+/// Unique-per-call cache name: pid + nanos + source-path hash. Avoids
+/// cross-document races on the same source and removes any need for a
+/// `.partial` rename since no other call competes for this name.
+fn unique_cache_path(cache_dir: &Path, source: &Path, extension: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    cache_dir.join(format!(
+        "{}-{:032x}-{:016x}.{extension}",
+        std::process::id(),
+        nanos,
+        hasher.finish()
+    ))
+}
+
+/// First `count` rows of a UTF-8 source, for the header vote.
+fn sample_rows(read_path: &Path, data_start: u64, delimiter: u8, count: usize) -> std::io::Result<Vec<Vec<String>>> {
+    let mut file = File::open(read_path)?;
+    file.seek(SeekFrom::Start(data_start))?;
+    let mut parser = CsvUtf8Parser::new(file, delimiter)?;
+    let mut rows = Vec::with_capacity(count);
+    while rows.len() < count {
+        match parser.try_read_row()? {
+            Some(row) => rows.push(row),
+            None => break,
+        }
+    }
+    Ok(rows)
+}
+
+/// Working copy of a headerless file with generated column names on top, so
+/// the first record is read as data everywhere. Lives as long as the guard.
+fn write_headerless_cache(
+    read_path: &Path,
+    data_start: u64,
+    delimiter: u8,
+    width: usize,
+) -> std::io::Result<(PathBuf, CacheGuard)> {
+    let cache_dir = std::env::temp_dir().join("clear-rows").join("utf8-cache");
+    std::fs::create_dir_all(&cache_dir)?;
+    let cache_path = unique_cache_path(&cache_dir, read_path, "hdr");
+    let guard = CacheGuard { path: cache_path.clone() };
+
+    let mut source = File::open(read_path)?;
+    source.seek(SeekFrom::Start(data_start))?;
+    let mut writer = BufWriter::with_capacity(1024 * 1024, File::create(&cache_path)?);
+    let separator = String::from_utf8_lossy(&[delimiter]).into_owned();
+    let header = synthetic_headers(width).join(&separator);
+    writer.write_all(header.as_bytes())?;
+    writer.write_all(b"\n")?;
+    std::io::copy(&mut source, &mut writer)?;
+    writer.flush()?;
+    let file = writer.into_inner().map_err(|e| e.into_error())?;
+    file.sync_all()?;
+    Ok((cache_path, guard))
 }
 
 fn sweep_stale_cache_entries(dir: &Path, max_age: Duration) {
@@ -575,20 +860,18 @@ fn apply_encoding_override(
     choice: &str,
     path: &Path,
 ) -> std::io::Result<()> {
-    let normalized = choice.to_ascii_lowercase();
-    let (encoding, label) = match normalized.as_str() {
-        "utf-8" => (Encoding::Utf8, "utf-8"),
-        "utf-8-bom" => (Encoding::Utf8Bom, "utf-8-bom"),
-        "utf-16-le" => (Encoding::Utf16Le, "utf-16-le"),
-        "utf-16-be" => (Encoding::Utf16Be, "utf-16-be"),
-        // Unknown choice: leave detection in place rather than corrupting state.
-        _ => return Ok(()),
+    // Accepts our fixed labels plus any WHATWG encoding label (windows-1252,
+    // shift_jis, koi8-r, ...). Unknown choice: leave detection in place rather
+    // than corrupting state.
+    let Some(encoding) = Encoding::from_label(choice) else {
+        return Ok(());
     };
 
     let data_start = data_start_for_override(path, encoding)?;
     profiled.encoding = encoding;
     profiled.data_start = data_start;
-    profiled.profile.encoding = label.to_owned();
+    profiled.profile.encoding = encoding.label();
+    profiled.profile.encoding_source = EncodingSource::User.as_str().to_owned();
     // User asserted the encoding; trust them over the binary-looking heuristic
     // (e.g. BOM-less UTF-16 reads as binary to the byte-level sniffer).
     profiled.profile.binary_like = false;
@@ -605,14 +888,14 @@ fn data_start_for_override(path: &Path, encoding: Encoding) -> std::io::Result<u
     let n = file.read(&mut prefix)?;
 
     let matches_bom = match encoding {
-        Encoding::Utf8 => false,
+        Encoding::Utf8 | Encoding::Legacy(_) => false,
         Encoding::Utf8Bom => n >= 3 && prefix == [0xEF, 0xBB, 0xBF],
         Encoding::Utf16Le => n >= 2 && prefix[0] == 0xFF && prefix[1] == 0xFE,
         Encoding::Utf16Be => n >= 2 && prefix[0] == 0xFE && prefix[1] == 0xFF,
     };
 
     Ok(match encoding {
-        Encoding::Utf8 => 0,
+        Encoding::Utf8 | Encoding::Legacy(_) => 0,
         Encoding::Utf8Bom => {
             if matches_bom {
                 3
@@ -728,6 +1011,7 @@ mod tests {
             OpenOptions {
                 delimiter_override: Some(b'|'),
                 encoding_override: None,
+                header_override: None,
             },
         )
         .expect("open with delimiter override");
@@ -761,6 +1045,7 @@ mod tests {
             OpenOptions {
                 delimiter_override: None,
                 encoding_override: Some("utf-16-le".to_owned()),
+                header_override: None,
             },
         )
         .expect("open with encoding override");
@@ -930,5 +1215,112 @@ mod tests {
         assert_eq!(tail.start, tail_start);
         assert!(!tail.rows.is_empty());
         assert!(tail.rows.iter().all(|row| row.len() == 5));
+    }
+
+    /// Chunked decoding must match the streaming decoder byte for byte, in
+    /// particular when a chunk cut lands inside a surrogate pair, on an odd
+    /// byte, or on a multibyte character in a single-byte codepage.
+    #[test]
+    fn chunked_transcode_matches_streaming_decoder() {
+        use encoding_rs::{UTF_16BE, UTF_16LE, WINDOWS_1252};
+
+        let text: String = (0..2_000)
+            .map(|i| match i % 5 {
+                0 => "a,b,c\n".to_owned(),
+                1 => "emoji,\u{1F600}\u{1F601},x\n".to_owned(),
+                2 => "caf\u{e9},na\u{ef}ve,\u{2014}\n".to_owned(),
+                3 => "\u{10FFFF}\u{10000},pair,end\n".to_owned(),
+                _ => format!("row{i},\"q,\"\"q\"\",{i}\n"),
+            })
+            .collect();
+
+        let mut utf16le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        let mut utf16be: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_be_bytes()).collect();
+        // Trailing odd byte: both decoders should emit U+FFFD for it.
+        utf16le.push(0x41);
+        utf16be.push(0x41);
+        let (cp1252, _, _) = WINDOWS_1252.encode(&text);
+        let mut cp1252 = cp1252.into_owned();
+        cp1252.extend_from_slice(&[0x81, 0x8D, 0xFF]); // undefined + high bytes
+
+        for (label, bytes, charset) in [
+            ("utf-16le", utf16le, UTF_16LE),
+            ("utf-16be", utf16be, UTF_16BE),
+            ("windows-1252", cp1252, WINDOWS_1252),
+        ] {
+            let mut streamed = Vec::new();
+            let mut decoder = DecodeReaderBytesBuilder::new()
+                .encoding(Some(charset))
+                .bom_sniffing(false)
+                .build(std::io::Cursor::new(&bytes));
+            decoder.read_to_end(&mut streamed).unwrap();
+
+            // Cuts of 7 and 10 bytes hit every boundary case many times.
+            for chunk in [7usize, 10, 64, 1 << 20] {
+                let mut chunked = Vec::new();
+                transcode_chunked(&bytes, charset, chunk, &mut chunked).unwrap();
+                assert!(
+                    chunked == streamed,
+                    "{label} with {chunk}-byte chunks diverged from the streaming decoder"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn headerless_files_get_generated_column_names() {
+        let path = std::env::temp_dir().join(format!("clear_rows_headerless_{}.csv", std::process::id()));
+        fs::write(
+            &path,
+            "1347445,MALOKANE CONSALIA,FEMALE,PENDING RENEWAL,PENDING RENEWAL\r\r\n\
+             1347446,SOMEONE ELSE,MALE,ACTIVE,ACTIVE\r\r\n\
+             1347447,THIRD PERSON,FEMALE,ACTIVE,ACTIVE\r\r\n",
+        )
+        .unwrap();
+
+        let mut document = CsvDocument::open(&path).expect("open headerless csv");
+        let summary = document.summarize();
+        assert!(!summary.profile.has_header);
+        assert_eq!(summary.profile.header_source, "detected");
+        assert_eq!(summary.headers, ["Column 1", "Column 2", "Column 3", "Column 4", "Column 5"]);
+        assert_eq!(summary.row_count, 3);
+        let rows = document.get_rows(0, 3, 0, 5).unwrap();
+        assert_eq!(rows.rows[0][0], "1347445");
+        assert_eq!(rows.rows[2][1], "THIRD PERSON");
+
+        // The user can insist the first row is a header.
+        let mut forced = CsvDocument::open_progressive_with_options(
+            &path,
+            0,
+            OpenOptions { header_override: Some("header".to_owned()), ..OpenOptions::default() },
+        )
+        .unwrap();
+        forced.index_to_completion().unwrap();
+        let summary = forced.summarize();
+        assert!(summary.profile.has_header);
+        assert_eq!(summary.profile.header_source, "user");
+        assert_eq!(summary.headers[0], "1347445");
+        assert_eq!(summary.row_count, 2);
+        drop(forced);
+        drop(document);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn header_can_be_forced_to_data() {
+        let path = std::env::temp_dir().join(format!("clear_rows_forced_data_{}.csv", std::process::id()));
+        fs::write(&path, "id,name\n1,Ann\n2,Bo\n").unwrap();
+        let mut document = CsvDocument::open_progressive_with_options(
+            &path,
+            0,
+            OpenOptions { header_override: Some("data".to_owned()), ..OpenOptions::default() },
+        )
+        .unwrap();
+        document.index_to_completion().unwrap();
+        let summary = document.summarize();
+        assert_eq!(summary.headers, ["Column 1", "Column 2"]);
+        assert_eq!(summary.row_count, 3);
+        drop(document);
+        let _ = fs::remove_file(path);
     }
 }

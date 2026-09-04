@@ -10,7 +10,9 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use super::parser::CsvUtf8Parser;
+use super::scan::{field_bytes, BlockIndex, FileMap, RowScanner};
 use super::CsvError;
+use rayon::prelude::*;
 
 /// Number of (key, phys) pairs held in memory before we spill a sorted chunk
 /// to disk. 250k entries ≈ 25-30 MiB of keys for typical short text columns
@@ -29,11 +31,6 @@ const SAMPLE_ROWS_FOR_MODE: usize = 2_000;
 /// stray "n/a" row in a numeric column still sorts numerically, while a
 /// mostly-text column with a few embedded numbers stays in lex order.
 const NUMERIC_RATIO_THRESHOLD: f64 = 0.8;
-
-/// How often (in rows) we publish progress to the shared status. Tighter
-/// updates pay no IPC cost (status is read on demand) but we still want to
-/// avoid lock thrash on hot scan loops.
-const PROGRESS_UPDATE_INTERVAL: u64 = 4_096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -71,7 +68,7 @@ pub struct SortState {
     pub status: SortStatus,
     /// `permutation[sorted_index] == physical_data_index` (0-based, header
     /// excluded). `None` when no sort is active.
-    pub permutation: Option<Vec<u64>>,
+    pub permutation: Option<Arc<Vec<u64>>>,
 }
 
 impl SortState {
@@ -90,6 +87,8 @@ pub struct SortBuildOptions {
     pub data_start: u64,
     pub delimiter: u8,
     pub keys: Vec<SortKey>,
+    /// Row index from the open document; built on the fly when absent.
+    pub blocks: Option<BlockIndex>,
     pub spill_dir: PathBuf,
     pub generation: u64,
     pub generation_state: Arc<AtomicU64>,
@@ -102,6 +101,7 @@ pub fn build_sort(options: SortBuildOptions) -> Result<(), CsvError> {
         data_start,
         delimiter,
         keys,
+        blocks,
         spill_dir,
         generation,
         generation_state,
@@ -129,44 +129,58 @@ pub fn build_sort(options: SortBuildOptions) -> Result<(), CsvError> {
 
     let directions: Vec<SortDirection> = keys.iter().map(|k| k.direction).collect();
 
-    let mut parser = open_parser(&source_path, data_start, delimiter)?;
-    parser.try_skip_row()?; // header
+    // Key extraction runs block-parallel over a memory map; sorting and
+    // spilling keep the existing external-merge design so memory stays bounded.
+    let map = FileMap::open(&source_path)?;
+    let bytes = map.bytes();
+    let index = blocks.unwrap_or_else(|| BlockIndex::build(bytes, data_start, delimiter, 1024));
+    let ranges = index.ranges();
 
     let mut buffer: Vec<EncodedKey> = Vec::with_capacity(KEYS_PER_CHUNK.min(64_000));
     let mut chunk_paths: Vec<PathBuf> = Vec::new();
     let mut total_scanned: u64 = 0;
-    let mut phys_idx: u64 = 0;
 
-    loop {
+    for batch in ranges.chunks(64) {
         if !is_active(&generation_state, generation) {
             cleanup_spills(&chunk_paths, &spill_dir);
             return Ok(());
         }
+        let extracted: Vec<Vec<EncodedKey>> = batch
+            .par_iter()
+            .map(|&(_, first_row, start, end)| {
+                let end = end.min(bytes.len());
+                let slice = &bytes[start.min(end)..end];
+                let mut scanner = RowScanner::new(slice, 0, delimiter);
+                let mut fields = Vec::with_capacity(32);
+                let mut scratch = Vec::new();
+                let mut out = Vec::new();
+                let mut phys = first_row;
+                while scanner.next_row(&mut fields) {
+                    if phys > 0 {
+                        let mut sub_keys: Vec<Vec<u8>> = Vec::with_capacity(keys.len());
+                        for (key, mode) in keys.iter().zip(modes.iter()) {
+                            let raw = fields
+                                .get(key.column)
+                                .map(|f| String::from_utf8_lossy(field_bytes(slice, f, &mut scratch)).into_owned())
+                                .unwrap_or_default();
+                            sub_keys.push(encode_key(&raw, *mode));
+                        }
+                        out.push(EncodedKey { sub_keys, phys: phys - 1 });
+                    }
+                    phys += 1;
+                }
+                out
+            })
+            .collect();
 
-        let row = match parser.try_read_row()? {
-            Some(row) => row,
-            None => break,
-        };
-
-        let mut sub_keys: Vec<Vec<u8>> = Vec::with_capacity(keys.len());
-        for (key, mode) in keys.iter().zip(modes.iter()) {
-            let raw = row.get(key.column).map(String::as_str).unwrap_or("");
-            sub_keys.push(encode_key(raw, *mode));
+        for keys_in_block in extracted {
+            total_scanned += keys_in_block.len() as u64;
+            buffer.extend(keys_in_block);
         }
-        buffer.push(EncodedKey {
-            sub_keys,
-            phys: phys_idx,
-        });
-
-        phys_idx += 1;
-        total_scanned += 1;
-
-        if total_scanned % PROGRESS_UPDATE_INTERVAL == 0 {
-            state.lock().status.rows_scanned = total_scanned;
-        }
+        state.lock().status.rows_scanned = total_scanned;
 
         if buffer.len() >= KEYS_PER_CHUNK {
-            buffer.sort_unstable_by(|a, b| cmp_with_directions(a, b, &directions));
+            buffer.par_sort_unstable_by(|a, b| cmp_with_directions(a, b, &directions));
             let path = spill_dir.join(format!("chunk-{:05}.bin", chunk_paths.len()));
             write_chunk(&path, &buffer)?;
             chunk_paths.push(path);
@@ -182,11 +196,11 @@ pub fn build_sort(options: SortBuildOptions) -> Result<(), CsvError> {
     state.lock().status.rows_scanned = total_scanned;
 
     let permutation = if chunk_paths.is_empty() {
-        buffer.sort_unstable_by(|a, b| cmp_with_directions(a, b, &directions));
+        buffer.par_sort_unstable_by(|a, b| cmp_with_directions(a, b, &directions));
         buffer.into_iter().map(|k| k.phys).collect::<Vec<u64>>()
     } else {
         if !buffer.is_empty() {
-            buffer.sort_unstable_by(|a, b| cmp_with_directions(a, b, &directions));
+            buffer.par_sort_unstable_by(|a, b| cmp_with_directions(a, b, &directions));
             let path = spill_dir.join(format!("chunk-{:05}.bin", chunk_paths.len()));
             write_chunk(&path, &buffer)?;
             chunk_paths.push(path);
@@ -204,7 +218,7 @@ pub fn build_sort(options: SortBuildOptions) -> Result<(), CsvError> {
     }
 
     let mut s = state.lock();
-    s.permutation = Some(permutation);
+    s.permutation = Some(Arc::new(permutation));
     s.status.is_sorting = false;
     s.status.is_ready = true;
     s.status.keys = keys;
@@ -523,10 +537,16 @@ mod tests {
     ) -> Vec<u64> {
         let state = Arc::new(Mutex::new(SortState::idle()));
         let generation_state = Arc::new(AtomicU64::new(1));
+        // Unique per call: tests run in parallel in one process, so pid alone
+        // let two tests share (and delete) the same spill directory.
         let spill_dir = std::env::temp_dir().join(format!(
-            "clear-rows-sort-test-{}-{}",
+            "clear-rows-sort-test-{}-{}-{}",
             std::process::id(),
-            generation_state.load(AtomicOrdering::SeqCst)
+            generation_state.load(AtomicOrdering::SeqCst),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
         ));
 
         build_sort(SortBuildOptions {
@@ -534,6 +554,7 @@ mod tests {
             data_start: 0,
             delimiter,
             keys,
+            blocks: None,
             spill_dir,
             generation: 1,
             generation_state,
@@ -541,7 +562,7 @@ mod tests {
         })
         .expect("build sort");
 
-        let perm = state.lock().permutation.clone().expect("permutation");
+        let perm = state.lock().permutation.as_ref().map(|p| (**p).clone()).expect("permutation");
         perm
     }
 

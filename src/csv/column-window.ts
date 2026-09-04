@@ -62,9 +62,11 @@ export function calculateColumnWindow(options: {
 }
 
 function normalizeColumnWidth(width: number | undefined): number {
-  if (!Number.isFinite(width) || width === undefined || width <= 0) {
+  if (!Number.isFinite(width) || width === undefined || width < 0) {
     return CSV_DEFAULT_COL_WIDTH_PX;
   }
 
+  // Zero is meaningful: hidden columns fold to zero width and must not
+  // reserve space in the window.
   return width;
 }

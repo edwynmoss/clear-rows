@@ -1,0 +1,46 @@
+[
+  {
+    "waitFor": "window.__clearRows && window.__clearRows.session.rowCount > 0",
+    "timeout": 120000
+  },
+  {
+    "open": "sample-headerless.csv"
+  },
+  {
+    "waitFor": "/sample-headerless\\.csv$/.test(window.__clearRows.session.path || '') && window.__clearRows.session.rowCount > 0 && !document.querySelector('.cr-status-live:not([hidden])')",
+    "timeout": 120000
+  },
+  {
+    "expect": "window.__clearRows.session.headers.slice(0,3)",
+    "equals": [
+      "Column 1",
+      "Column 2",
+      "Column 3"
+    ]
+  },
+  {
+    "expect": "window.__clearRows.session.rowCount",
+    "equals": 20000
+  },
+  {
+    "expect": "document.querySelector('.cr-toasts')?.textContent || ''",
+    "matches": "First row looks like data"
+  },
+  {
+    "shot": "10-headerless"
+  },
+  {
+    "eval": "window.__clearRows.applyFilter('\"Column 4\":powershell').then(() => 'filtered')"
+  },
+  {
+    "waitFor": "window.__clearRows.session.activeFilter !== null",
+    "timeout": 60000
+  },
+  {
+    "expect": "document.querySelector('.cr-query-count')?.textContent",
+    "matches": "of 20,000"
+  },
+  {
+    "shot": "11-headerless-filtered"
+  }
+]

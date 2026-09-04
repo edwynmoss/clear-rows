@@ -18,9 +18,15 @@ export type CsvFileProfile = {
   delimiter_label: string | null;
   delimiter_confidence: string;
   encoding: string;
+  /** "bom" | "utf-8" | "detected" | "user" — how the encoding was decided. */
+  encoding_source: string;
   sampled_rows: number;
   likely_columns: number;
   binary_like: boolean;
+  /** False when the first row is data and columns carry generated names. */
+  has_header: boolean;
+  /** "detected" | "user" — how the header decision was made. */
+  header_source: string;
   warnings: string[];
 };
 
