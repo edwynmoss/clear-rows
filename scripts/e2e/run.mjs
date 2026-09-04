@@ -6,7 +6,7 @@
 //   npm run e2e -- smoke              one scenario
 //   E2E_FILE=path\to\big.csv npm run e2e
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,6 +25,11 @@ const scenarios = (requested.length > 0 ? requested.map((name) => (name.endsWith
 
 const sampleFile = process.env.E2E_FILE ?? ensureSampleFile();
 
+// A leftover instance from an aborted run keeps the debugging port, and the
+// driver would then talk to the old app instead of the one launched below.
+stopLeftovers();
+await waitForPortFree(port, 15_000);
+
 console.log(`launching app with ${sampleFile}`);
 const app = spawn("npm", ["run", "tauri", "dev"], {
   cwd: repo,
@@ -39,6 +44,20 @@ const app = spawn("npm", ["run", "tauri", "dev"], {
 let appLog = "";
 app.stdout.on("data", (chunk) => (appLog += chunk));
 app.stderr.on("data", (chunk) => (appLog += chunk));
+
+async function waitForPortFree(port, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await fetch(`http://127.0.0.1:${port}/json/version`);
+    } catch {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  console.warn(`port ${port} is still in use; the driver may attach to the wrong app`);
+  return false;
+}
 
 async function waitForDebugger(timeoutMs) {
   const deadline = Date.now() + timeoutMs;
@@ -75,12 +94,21 @@ try {
   }
   exitCode = failed === 0 ? 0 : 1;
   console.log(`\n${scenarios.length - failed} of ${scenarios.length} scenarios passed; screenshots in ${outDir}`);
+  if (failed > 0) console.log("\napp output (tail):\n" + appLog.split(/\r?\n/).slice(-40).join("\n"));
 } catch (err) {
   console.error(err instanceof Error ? err.message : String(err));
 } finally {
   stopApp();
 }
 process.exit(exitCode);
+
+function stopLeftovers() {
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/im", "clear-rows.exe", "/f", "/t"], { stdio: "ignore", shell: true });
+  } else {
+    spawnSync("pkill", ["-x", "clear-rows"], { stdio: "ignore" });
+  }
+}
 
 function stopApp() {
   if (process.platform === "win32") {

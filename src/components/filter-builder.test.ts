@@ -100,4 +100,22 @@ describe("createFilterBuilder", () => {
     expect(builder.root.querySelector<HTMLElement>(".cr-builder-suggest")!.hidden).toBe(false);
     expect(builder.root.querySelector<HTMLButtonElement>(".cr-builder-suggestion")!.textContent).toContain("wsc");
   });
+  it("closes from its own button and reports it", () => {
+    const { builder, anchor } = mount();
+    const onClose = vi.fn();
+    const closable = createFilterBuilder({
+      headers: () => headers,
+      sampleValues: async () => null,
+      onAddTerm: vi.fn(),
+      onSearchAll: vi.fn(),
+      onClose,
+    });
+    document.body.append(closable.root);
+    closable.open(anchor, "");
+    expect(closable.isOpen()).toBe(true);
+    closable.root.querySelector<HTMLButtonElement>(".cr-builder-close")!.click();
+    expect(closable.isOpen()).toBe(false);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(builder.isOpen()).toBe(false);
+  });
 });

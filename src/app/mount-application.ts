@@ -227,9 +227,11 @@ export function mountApplication(host: HTMLElement): void {
     onFocusChange: (focused, mode) => {
       window.clearTimeout(builderBlurTimer);
       if (focused) {
-        if (mode === "file" && session.path) filterBuilder.open(queryBar.field, queryBar.input.value);
+        if (mode === "file" && session.path && !builderDismissed) filterBuilder.open(queryBar.field, queryBar.input.value);
         return;
       }
+      // Leaving the field forgets an explicit close; the next visit opens again.
+      builderDismissed = false;
       // Let a click inside the builder land before deciding to close.
       builderBlurTimer = window.setTimeout(() => {
         if (!filterBuilder.contains(document.activeElement)) filterBuilder.close();
@@ -237,6 +239,13 @@ export function mountApplication(host: HTMLElement): void {
     },
     onInput: (text, mode) => {
       if (mode === "file") filterBuilder.setTyped(text);
+    },
+    onEscape: () => {
+      // First Escape only closes the builder; the query and its filter stay.
+      if (!filterBuilder.isOpen()) return false;
+      filterBuilder.close();
+      builderDismissed = true;
+      return true;
     },
   });
 
@@ -263,8 +272,20 @@ export function mountApplication(host: HTMLElement): void {
       queryBar.focus({ caretAtEnd: true });
       filterBuilder.setTyped(queryBar.input.value);
     },
+    onClose: () => {
+      builderDismissed = true;
+      queryBar.focus({ caretAtEnd: true });
+    },
   });
   let builderBlurTimer = 0;
+  /** True after the user closed the builder while still in the field. */
+  let builderDismissed = false;
+  // Clicking into an already-focused field brings a closed builder back.
+  queryBar.input.addEventListener("click", () => {
+    if (queryBar.getMode() !== "file" || !session.path || filterBuilder.isOpen()) return;
+    builderDismissed = false;
+    filterBuilder.open(queryBar.field, queryBar.input.value);
+  });
 
   async function sampleColumnValues(columnIndex: number): Promise<string[] | null> {
     if (!session.path) return null;
@@ -1463,6 +1484,7 @@ export function mountApplication(host: HTMLElement): void {
     }
     if (event.key === "Escape" && filterBuilder.isOpen()) {
       filterBuilder.close();
+      builderDismissed = true;
       return;
     }
     if (event.key === "Escape" && !inEditable) {

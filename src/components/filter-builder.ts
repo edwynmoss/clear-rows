@@ -38,6 +38,8 @@ export type FilterBuilderOptions = {
   onAddTerm: (term: string, replacesTyped: boolean) => void;
   /** Called when the user chooses "search everywhere" for the word being typed. */
   onSearchAll: (text: string) => void;
+  /** Called when the user closes the popover with its button or Escape. */
+  onClose?: () => void;
 };
 
 export type FilterBuilder = {
@@ -89,6 +91,20 @@ export function createFilterBuilder(options: FilterBuilderOptions): FilterBuilde
   root.setAttribute("role", "dialog");
   root.setAttribute("aria-label", "Build a filter");
 
+  // --- header: what this is, and a way out ---------------------------
+  const head = document.createElement("div");
+  head.className = "cr-builder-head";
+  const title = document.createElement("span");
+  title.className = "cr-builder-title";
+  title.textContent = "Filter builder";
+  const closeButton = document.createElement("button");
+  closeButton.type = "button";
+  closeButton.className = "cr-builder-close";
+  closeButton.setAttribute("aria-label", "Close filter builder");
+  closeButton.title = "Close (Esc)";
+  closeButton.textContent = "\u00d7";
+  head.append(title, closeButton);
+
   // --- typed-text suggestions ---------------------------------------
   const suggest = document.createElement("div");
   suggest.className = "cr-builder-suggest";
@@ -135,7 +151,7 @@ export function createFilterBuilder(options: FilterBuilderOptions): FilterBuilde
   hint.className = "cr-builder-hint";
   hint.textContent = "Conditions combine with AND. You can also type them: severity=high  -user:svc  /regex/";
 
-  root.append(suggest, row, hint);
+  root.append(head, suggest, row, hint);
 
   let anchor: HTMLElement | null = null;
   let typed = "";
@@ -266,6 +282,11 @@ export function createFilterBuilder(options: FilterBuilderOptions): FilterBuilde
   });
   conditionSelect.addEventListener("change", syncValueField);
   addButton.addEventListener("click", submit);
+  closeButton.addEventListener("click", () => {
+    root.hidden = true;
+    anchor = null;
+    options.onClose?.();
+  });
   valueInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();

@@ -18,6 +18,8 @@ export type QueryBarOptions = {
   onFocusChange?: (focused: boolean, mode: QueryMode) => void;
   /** Text changed while typing. */
   onInput?: (text: string, mode: QueryMode) => void;
+  /** Escape pressed in the field; return true when something else consumed it (e.g. a popover closed). */
+  onEscape?: (mode: QueryMode) => boolean;
 };
 
 export type QueryBar = {
@@ -208,6 +210,7 @@ export function createQueryBar(options: QueryBarOptions): QueryBar {
       options.onSubmit(mode, input.value, Number(limitSelect.value));
     } else if (event.key === "Escape") {
       event.preventDefault();
+      if (options.onEscape?.(mode)) return;
       if (busy) {
         options.onCancel();
       } else if (input.value.length > 0) {
