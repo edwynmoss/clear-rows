@@ -1,53 +1,205 @@
 [
-  {"waitFor": "window.__clearRows && window.__clearRows.session.rowCount > 0 && !document.querySelector('.cr-status-live:not([hidden])')", "timeout": 120000},
-  {"expect": "document.querySelector('.cr-filechip-name')?.textContent", "matches": "\\.csv$"},
-  {"expect": "document.querySelectorAll('.cr-row').length > 0", "equals": true},
-  {"shot": "01-loaded"},
-
-  {"eval": "window.__clearRows.applyFilter('process:powershell -severity=low').then(() => 'filtered')"},
-  {"waitFor": "window.__clearRows.session.activeFilter !== null", "timeout": 60000},
-  {"expect": "document.querySelectorAll('.cr-chip').length", "equals": 2},
-  {"expect": "document.querySelector('.cr-query-count')?.textContent", "matches": "of"},
-  {"shot": "02-filtered"},
-
-  {"click": ".cr-col[data-column-index='1']"},
-  {"waitFor": "/^Sorted by/.test(document.querySelector('.cr-status-message')?.textContent || '')", "timeout": 60000},
-  {"waitFor": "document.querySelector('.cr-grid')?.dataset.stale !== 'true'", "timeout": 30000},
-  {"expect": "document.querySelector(\".cr-col[data-column-index='1']\")?.getAttribute('aria-sort')", "equals": "ascending"},
-  {"expect": "document.querySelectorAll('.cr-row').length > 0", "equals": true},
-  {"shot": "03-sorted"},
-
-  {"click": ".cr-grid-scroll"},
-  {"clickAt": [560, 190]},
-  {"key": "Enter"},
-  {"waitFor": "!document.querySelector('.cr-detail').hidden", "timeout": 10000},
-  {"expect": "document.querySelector('.cr-detail-title')?.textContent?.length > 0", "equals": true},
-  {"shot": "04-detail"},
-  {"key": "Escape"},
-
-  {"click": ".cr-query-input"},
-  {"waitFor": "!document.querySelector('.cr-builder').hidden", "timeout": 5000},
-  {"expect": "document.querySelectorAll('.cr-builder-column option').length", "equals": 10},
-  {"shot": "05-builder"},
-  {"key": "Escape"},
-
-  {"key": "k", "mods": 2},
-  {"waitFor": "!document.querySelector('.cr-palette-backdrop').hidden", "timeout": 5000},
-  {"expect": "document.querySelectorAll('.cr-palette-item').length > 5", "equals": true},
-  {"shot": "06-palette"},
-  {"key": "Escape"},
-
-  {"eval": "window.__clearRows.applySearchFiles([window.__clearRows.session.path], false).then(() => 'files')"},
-  {"eval": "window.__clearRows.runSearch('mshta', 500).then(() => 'searched')"},
-  {"waitFor": "/match/.test(document.querySelector('.cr-status-message')?.textContent || '')", "timeout": 60000},
-  {"expect": "document.querySelectorAll('.dp-results-row').length > 0", "equals": true},
-  {"shot": "07-search"},
-
-  {"eval": "window.__clearRows.runExportTo((window.__clearRows.session.path || 'x').replace(/\\.csv$/, '') + '-e2e-export.csv').then(() => 'exported')"},
-  {"waitFor": "/^Exported/.test(document.querySelector('.cr-toasts')?.textContent || '')", "timeout": 60000},
-  {"shot": "08-exported"},
-
-  {"eval": "window.__clearRows.closeFile(); 'closed'"},
-  {"expect": "document.querySelector('.cr-empty').hidden", "equals": false},
-  {"shot": "09-empty"}
+  {
+    "waitFor": "window.__clearRows && window.__clearRows.session.rowCount > 0 && !document.querySelector('.cr-status-live:not([hidden])')",
+    "timeout": 120000
+  },
+  {
+    "expect": "document.querySelector('.cr-filechip-name')?.textContent",
+    "matches": "\\.csv$"
+  },
+  {
+    "expect": "document.querySelectorAll('.cr-row').length > 0",
+    "equals": true
+  },
+  {
+    "shot": "01-loaded"
+  },
+  {
+    "eval": "window.__clearRows.applyFilter('process:powershell -severity=low').then(() => 'filtered')"
+  },
+  {
+    "waitFor": "window.__clearRows.session.activeFilter !== null",
+    "timeout": 60000
+  },
+  {
+    "expect": "document.querySelectorAll('.cr-chip').length",
+    "equals": 2
+  },
+  {
+    "expect": "document.querySelector('.cr-query-count')?.textContent",
+    "matches": "of"
+  },
+  {
+    "shot": "02-filtered"
+  },
+  {
+    "click": ".cr-col[data-column-index='1']"
+  },
+  {
+    "waitFor": "/^Sorted by/.test(document.querySelector('.cr-status-message')?.textContent || '')",
+    "timeout": 60000
+  },
+  {
+    "waitFor": "document.querySelector('.cr-grid')?.dataset.stale !== 'true'",
+    "timeout": 30000
+  },
+  {
+    "expect": "document.querySelector(\".cr-col[data-column-index='1']\")?.getAttribute('aria-sort')",
+    "equals": "ascending"
+  },
+  {
+    "expect": "document.querySelectorAll('.cr-row').length > 0",
+    "equals": true
+  },
+  {
+    "shot": "03-sorted"
+  },
+  {
+    "click": ".cr-grid-scroll"
+  },
+  {
+    "clickAt": [
+      560,
+      190
+    ]
+  },
+  {
+    "key": "Enter"
+  },
+  {
+    "waitFor": "!document.querySelector('.cr-detail').hidden",
+    "timeout": 10000
+  },
+  {
+    "expect": "document.querySelector('.cr-detail-title')?.textContent?.length > 0",
+    "equals": true
+  },
+  {
+    "shot": "04-detail"
+  },
+  {
+    "key": "Escape"
+  },
+  {
+    "click": ".cr-query-input"
+  },
+  {
+    "waitFor": "!document.querySelector('.cr-builder').hidden",
+    "timeout": 5000
+  },
+  {
+    "expect": "document.querySelectorAll('.cr-builder-column option').length",
+    "equals": 10
+  },
+  {
+    "shot": "05-builder"
+  },
+  {
+    "click": ".cr-builder-close"
+  },
+  {
+    "waitFor": "document.querySelector('.cr-builder').hidden",
+    "timeout": 5000
+  },
+  {
+    "expect": "document.activeElement.className",
+    "equals": "cr-query-input"
+  },
+  {
+    "click": ".cr-query-input"
+  },
+  {
+    "waitFor": "!document.querySelector('.cr-builder').hidden",
+    "timeout": 5000
+  },
+  {
+    "key": "Escape"
+  },
+  {
+    "waitFor": "document.querySelector('.cr-builder').hidden",
+    "timeout": 5000
+  },
+  {
+    "expect": "document.querySelector('.cr-query-input').value",
+    "matches": "process:powershell"
+  },
+  {
+    "click": ".cr-grid-scroll"
+  },
+  {
+    "click": ".cr-query-input"
+  },
+  {
+    "waitFor": "!document.querySelector('.cr-builder').hidden",
+    "timeout": 5000
+  },
+  {
+    "shot": "05b-builder-reopened"
+  },
+  {
+    "expect": "document.querySelector('.cr-query-input').value",
+    "matches": "process:powershell"
+  },
+  {
+    "expect": "document.querySelectorAll('.cr-chip').length",
+    "equals": 2
+  },
+  {
+    "key": "Escape"
+  },
+  {
+    "key": "k",
+    "mods": 2
+  },
+  {
+    "waitFor": "!document.querySelector('.cr-palette-backdrop').hidden",
+    "timeout": 5000
+  },
+  {
+    "expect": "document.querySelectorAll('.cr-palette-item').length > 5",
+    "equals": true
+  },
+  {
+    "shot": "06-palette"
+  },
+  {
+    "key": "Escape"
+  },
+  {
+    "eval": "window.__clearRows.applySearchFiles([window.__clearRows.session.path], false).then(() => 'files')"
+  },
+  {
+    "eval": "window.__clearRows.runSearch('mshta', 500).then(() => 'searched')"
+  },
+  {
+    "waitFor": "/match/.test(document.querySelector('.cr-status-message')?.textContent || '')",
+    "timeout": 60000
+  },
+  {
+    "expect": "document.querySelectorAll('.dp-results-row').length > 0",
+    "equals": true
+  },
+  {
+    "shot": "07-search"
+  },
+  {
+    "eval": "window.__clearRows.runExportTo((window.__clearRows.session.path || 'x').replace(/\\.csv$/, '') + '-e2e-export.csv').then(() => 'exported')"
+  },
+  {
+    "waitFor": "/^Exported/.test(document.querySelector('.cr-toasts')?.textContent || '')",
+    "timeout": 60000
+  },
+  {
+    "shot": "08-exported"
+  },
+  {
+    "eval": "window.__clearRows.closeFile(); 'closed'"
+  },
+  {
+    "expect": "document.querySelector('.cr-empty').hidden",
+    "equals": false
+  },
+  {
+    "shot": "09-empty"
+  }
 ]
