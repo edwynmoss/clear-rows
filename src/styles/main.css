@@ -1922,6 +1922,36 @@
   color: var(--text);
 }
 
+/* Typed columns: numbers sit on the right so magnitudes line up; dates keep
+   tabular digits. Text stays as it was. */
+.cr-cell[data-type="integer"],
+.cr-cell[data-type="decimal"],
+.cr-col[data-type="integer"],
+.cr-col[data-type="decimal"] {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.cr-col[data-type="integer"] .cr-col-label,
+.cr-col[data-type="decimal"] .cr-col-label {
+  margin-left: auto;
+}
+
+.cr-cell[data-type="date"],
+.cr-cell[data-type="datetime"] {
+  font-variant-numeric: tabular-nums;
+}
+
+.cr-menu-head {
+  color: var(--dim);
+  font-size: 11px;
+  letter-spacing: 0.2px;
+  overflow: hidden;
+  padding: 6px 10px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ------------------------------------------------------------- empty hero */
 
 .cr-hero {

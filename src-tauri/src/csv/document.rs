@@ -9,7 +9,8 @@ use encoding_rs_io::DecodeReaderBytesBuilder;
 use serde::Serialize;
 use thiserror::Error;
 
-use super::header::{detect_header, synthetic_headers, HeaderMode, HEADER_SAMPLE_ROWS};
+use super::header::{detect_header, synthetic_headers, HeaderMode};
+use super::types::{detect_column_type, ColumnProfile, ColumnType, DateOrder};
 use super::profile::{delimiter_label, Encoding, EncodingSource, ProfiledCsvFile};
 use super::scan::{BlockIndex, FileMap, RowScanner};
 use super::{profile_csv_path, CsvFileProfile, CsvUtf8Parser};
@@ -61,7 +62,13 @@ pub struct OpenSummary {
     pub file_size: u64,
     pub error: Option<String>,
     pub profile: CsvFileProfile,
+    /// One entry per header, typed from the first rows.
+    pub column_types: Vec<ColumnProfile>,
 }
+
+/// Rows read at open for the header vote and column typing. Cheap: a few
+/// hundred rows parse in well under a millisecond per megabyte.
+const OPEN_SAMPLE_ROWS: usize = 512;
 
 #[derive(Clone, Serialize)]
 pub struct IndexStatus {
@@ -93,6 +100,7 @@ pub struct CsvDocument {
     block_starts: Vec<u64>,
     block_size: u64,
     headers: Vec<String>,
+    column_types: Vec<ColumnProfile>,
     physical_rows: u64,
     indexed_bytes: u64,
     file_size: u64,
@@ -228,7 +236,7 @@ impl CsvDocument {
         // working copy with generated names prepended, so every reader keeps
         // its "row 0 is the header" model.
         let mode = HeaderMode::from_label(options.header_override.as_deref());
-        let sample = sample_rows(&read_path, read_data_start, profiled.delimiter, HEADER_SAMPLE_ROWS)?;
+        let sample = sample_rows(&read_path, read_data_start, profiled.delimiter, OPEN_SAMPLE_ROWS)?;
         let has_header = match mode {
             HeaderMode::Present => true,
             HeaderMode::Absent => false,
@@ -243,6 +251,11 @@ impl CsvDocument {
             read_path = cache;
             read_data_start = 0;
         }
+        let sample_data: &[Vec<String>] = if has_header { sample.get(1..).unwrap_or(&[]) } else { &sample };
+        let sample_width = sample.iter().map(Vec::len).max().unwrap_or(0);
+        let mut column_types: Vec<ColumnProfile> = (0..sample_width)
+            .map(|column| detect_column_type(sample_data.iter().filter_map(|row| row.get(column)).map(String::as_str)))
+            .collect();
 
         // file_size is the indexer's denominator; for UTF-16 the indexer streams
         // the transcoded cache, so measure it (not the source) to keep progress
@@ -284,6 +297,10 @@ impl CsvDocument {
             profile: profiled.profile,
             block_starts,
             block_size: DEFAULT_BLOCK_SIZE,
+            column_types: {
+                column_types.resize(headers.len(), ColumnProfile { kind: ColumnType::Empty, date_order: DateOrder::DayFirst });
+                column_types
+            },
             headers,
             physical_rows: row_index,
             indexed_bytes,
@@ -312,7 +329,14 @@ impl CsvDocument {
             file_size: self.file_size,
             error: self.index_error.clone(),
             profile: self.profile.clone(),
+            column_types: self.column_types.clone(),
         }
+    }
+
+    /// Detected type of each column, in header order.
+    #[allow(dead_code)]
+    pub fn column_types(&self) -> &[ColumnProfile] {
+        &self.column_types
     }
 
     pub fn index_status(&self) -> IndexStatus {
@@ -1320,6 +1344,17 @@ mod tests {
         let summary = document.summarize();
         assert_eq!(summary.headers, ["Column 1", "Column 2"]);
         assert_eq!(summary.row_count, 3);
+        drop(document);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn summary_reports_column_types() {
+        let path = std::env::temp_dir().join(format!("clear_rows_types_{}.csv", std::process::id()));
+        fs::write(&path, "id,when,amount,name\n1,2026-08-01,R 1 200.50,Ann\n2,2026-08-02,3,Bo\n3,,4.5,Cy\n").unwrap();
+        let document = CsvDocument::open(&path).unwrap();
+        let types: Vec<ColumnType> = document.summarize().column_types.iter().map(|c| c.kind).collect();
+        assert_eq!(types, [ColumnType::Integer, ColumnType::Date, ColumnType::Decimal, ColumnType::Text]);
         drop(document);
         let _ = fs::remove_file(path);
     }

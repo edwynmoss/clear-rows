@@ -231,6 +231,7 @@ export class CsvGridVirtualizer {
             rowHeightPx: rowHeight,
             gutterWidthPx: this.gutterWidthPx,
             highlightedCell: this.highlightedCell,
+            columnTypes: this.columnTypeNames(),
           }),
         );
       }
@@ -293,6 +294,10 @@ export class CsvGridVirtualizer {
       viewportWidthPx: Math.max(0, this.refs.scrollRegion.clientWidth - this.gutterWidthPx),
       bufferPx: this.columnBufferPx,
     });
+  }
+
+  private columnTypeNames(): string[] {
+    return this.session.columnTypes.map((profile) => profile.type);
   }
 
   setPendingSortColumn(columnIndex: number | null): void {
@@ -442,6 +447,7 @@ export class CsvGridVirtualizer {
 
     renderCsvHeaderRow(this.refs.headerRow, this.session.headers, this.session.colWidths, this.rowHeightPx, columnWindow, {
       activeSort: this.session.activeSort,
+      columnTypes: this.columnTypeNames(),
       pendingSortColumn: this.pendingSortColumn,
       onResizeStart: (columnIndex, event) => {
         this.resizeState = {

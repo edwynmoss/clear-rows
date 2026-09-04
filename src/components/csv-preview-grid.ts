@@ -1,4 +1,5 @@
 import { CSV_DEFAULT_COL_WIDTH_PX } from "../app/constants";
+import { columnTypeLabel, type ColumnType } from "../csv/column-types";
 import type { CsvColumnWindow } from "../csv/column-window";
 import type { ActiveSort } from "../csv/csv-session";
 
@@ -90,6 +91,8 @@ export function createCsvPreviewGrid(options: CsvPreviewGridOptions = {}): CsvPr
 
 export type RenderHeaderOptions = {
   activeSort?: ActiveSort;
+  /** Detected type per column ("integer", "date", ...) for alignment and tooltips. */
+  columnTypes?: string[];
   pendingSortColumn?: number | null;
   onResizeStart?: (columnIndex: number, event: PointerEvent) => void;
   onResizeReset?: (columnIndex: number) => void;
@@ -120,7 +123,9 @@ export function renderCsvHeaderRow(
     cell.style.width = `${w}px`;
     cell.style.minWidth = `${w}px`;
     cell.style.height = `${rowHeightPx}px`;
-    cell.title = headers[i] ?? "";
+    const type = options.columnTypes?.[i] ?? "";
+    cell.dataset.type = type;
+    cell.title = type ? `${headers[i] || `Column ${i + 1}`} · ${columnTypeLabel(type as ColumnType)}` : (headers[i] ?? "");
 
     const label = document.createElement("span");
     label.className = "cr-col-label";

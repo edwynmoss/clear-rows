@@ -17,6 +17,7 @@ function setup(rowCount: number) {
     indexed_bytes: 1,
     file_size: 1,
     error: null,
+    column_types: [],
     profile: {
       extension: "csv",
       detected_kind: "csv",
