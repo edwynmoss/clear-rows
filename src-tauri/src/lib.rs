@@ -3,7 +3,7 @@ mod csv;
 use csv::{
     build_export, build_filter, build_sort, CsvDocument, CsvFileProfile, CsvSearchProgress, SortKey,
     CsvSearchSummary, ExportBuildOptions, ExportState, ExportStatus, FilterBuildOptions,
-    FilterState, FilterStatus, IndexStatus, OpenOptions, OpenSummary, RowBatch, SortBuildOptions,
+    ColumnStats, ColumnStatsOptions, compute_column_stats, FilterState, FilterStatus, IndexStatus, OpenOptions, OpenSummary, RowBatch, SortBuildOptions,
     SortState, SortStatus,
 };
 use parking_lot::Mutex;
@@ -40,6 +40,8 @@ pub struct AppState {
     /// permutation (visible order -> physical data index). Keyed by pointer
     /// identity of the two inputs, so it is rebuilt only when either changes.
     composed_view: Arc<Mutex<Option<ComposedView>>>,
+    /// Bumped per column-stats request so a newer request cancels an older one.
+    stats_generation: Arc<AtomicU64>,
 }
 
 struct ComposedView {
@@ -469,6 +471,56 @@ async fn start_csv_filter(
     Ok(status)
 }
 
+/// Statistics for one column over the rows currently in view (the active
+/// filter, if any). Sorting does not change the answer, so it is ignored.
+#[tauri::command]
+async fn column_stats(
+    column: usize,
+    top_n: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<ColumnStats, String> {
+    let document_state = Arc::clone(&state.document);
+    let filter_state = Arc::clone(&state.filter_state);
+    let stats_generation = Arc::clone(&state.stats_generation);
+
+    let (options, generation) = {
+        let guard = document_state.lock();
+        let document = guard
+            .as_ref()
+            .ok_or_else(|| csv::CsvError::NoDocument.to_string())?;
+        if !document.is_indexing_complete() {
+            return Err("Indexing is still running. Wait for it to finish before inspecting a column.".to_owned());
+        }
+        let profile = document
+            .column_types()
+            .get(column)
+            .copied()
+            .ok_or_else(|| format!("Column index {} is out of range.", column))?;
+        let generation = stats_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        (
+            ColumnStatsOptions {
+                source_path: document.read_path().to_path_buf(),
+                data_start: document.read_data_start(),
+                delimiter: document.delimiter(),
+                blocks: Some(document.block_index()),
+                column,
+                profile,
+                mask: filter_state.lock().mask.clone(),
+                top_n: top_n.unwrap_or(12).clamp(1, 200),
+                generation,
+                generation_state: Arc::clone(&stats_generation),
+            },
+            generation,
+        )
+    };
+    let _ = generation;
+
+    tauri::async_runtime::spawn_blocking(move || compute_column_stats(options))
+        .await
+        .map_err(|err| err.to_string())?
+        .map_err(|err| err.to_string())
+}
+
 #[tauri::command]
 fn csv_filter_status(state: State<'_, AppState>) -> FilterStatus {
     let status = state.filter_state.lock().status.clone();
@@ -724,6 +776,7 @@ pub fn run() {
             export_generation: Arc::new(AtomicU64::new(0)),
             export_state: Arc::new(Mutex::new(ExportState::idle())),
             composed_view: Arc::new(Mutex::new(None)),
+            stats_generation: Arc::new(AtomicU64::new(0)),
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -741,6 +794,7 @@ pub fn run() {
             clear_csv_sort,
             start_csv_filter,
             csv_filter_status,
+            column_stats,
             clear_csv_filter,
             start_csv_export,
             csv_export_status,

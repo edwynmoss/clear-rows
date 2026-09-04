@@ -4,6 +4,7 @@ import { CSV_MAX_ROWS_PER_BATCH } from "../app/constants";
 import { isDesktopRuntime } from "../tauri/runtime";
 import { shimInvoke } from "../tauri/browser-shim";
 import type {
+  ColumnStats,
   CsvFileProfileResult,
   CsvSearchProgress,
   CsvSearchSummary,
@@ -50,6 +51,11 @@ export async function fetchCsvRows(
     columnStart: Math.max(0, Math.floor(columnStart)),
     columnCount: Math.max(0, Math.floor(columnCount)),
   });
+}
+
+/** Statistics for one column over the rows in view. */
+export async function fetchColumnStats(column: number, topN = 12): Promise<ColumnStats> {
+  return invoke<ColumnStats>("column_stats", { column, topN });
 }
 
 export async function getStartupCsvPath(): Promise<string | null> {

@@ -6,12 +6,14 @@ mod parser;
 mod profile;
 pub mod header;
 pub mod scan;
+pub mod stats;
 pub mod types;
 mod search;
 mod sort;
 
 pub use document::{CsvDocument, CsvError, IndexStatus, OpenOptions, OpenSummary, RowBatch};
 pub use export::{build_export, ExportBuildOptions, ExportState, ExportStatus};
+pub use stats::{compute_column_stats, ColumnStats, ColumnStatsOptions};
 pub use filter::{build_filter, FilterBuildOptions, FilterState, FilterStatus};
 pub use parser::CsvUtf8Parser;
 pub use profile::{profile_csv_path, CsvFileProfile};

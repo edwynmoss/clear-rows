@@ -137,3 +137,16 @@ export type ExportStatus = {
   total_rows: number;
   error: string | null;
 };
+
+export type ColumnStats = {
+  column: number;
+  rows: number;
+  empty: number;
+  distinct: number;
+  distinct_is_lower_bound: boolean;
+  top: Array<{ value: string; count: number }>;
+  numeric: { min: number; max: number; mean: number; sum: number; parsed: number } | null;
+  temporal: { earliest: string; latest: string; parsed: number } | null;
+  text: { shortest: number; longest: number; mean_length: number } | null;
+  cancelled: boolean;
+};
