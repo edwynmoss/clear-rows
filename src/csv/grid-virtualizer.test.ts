@@ -32,6 +32,7 @@ function setup(rowCount: number) {
       binary_like: false,
       has_header: true,
       header_source: "detected",
+      compression: null,
       warnings: [],
     },
   });

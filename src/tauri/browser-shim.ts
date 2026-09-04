@@ -36,6 +36,7 @@ type Dataset = {
   hasHeader: boolean;
   headerSource: string;
   columnTypes: ColumnProfile[];
+  compression?: string | null;
   sizeBytes: number;
 };
 
@@ -55,8 +56,9 @@ export function isBrowserShimActive(): boolean {
 }
 
 /** Register text as a virtual file so `open_csv` can find it by path. */
-export function registerVirtualFile(path: string, bytes: Uint8Array | string, sizeBytes?: number): void {
+export function registerVirtualFile(path: string, bytes: Uint8Array | string, sizeBytes?: number, compression: string | null = null): void {
   const dataset = decodeAndParse(path, bytes, sizeBytes);
+  dataset.compression = compression;
   files.set(path, dataset);
 }
 
@@ -454,6 +456,7 @@ function profileOf(dataset: Dataset): CsvFileProfile {
     binary_like: false,
     has_header: dataset.hasHeader,
     header_source: dataset.headerSource,
+    compression: dataset.compression ?? null,
     warnings: [],
   };
 }

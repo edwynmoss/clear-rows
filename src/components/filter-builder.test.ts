@@ -100,6 +100,27 @@ describe("createFilterBuilder", () => {
     expect(builder.root.querySelector<HTMLElement>(".cr-builder-suggest")!.hidden).toBe(false);
     expect(builder.root.querySelector<HTMLButtonElement>(".cr-builder-suggestion")!.textContent).toContain("wsc");
   });
+  it("offers recent filters while the field is empty", () => {
+    const onRecent = vi.fn();
+    const builder = createFilterBuilder({
+      headers: () => headers,
+      sampleValues: async () => null,
+      onAddTerm: vi.fn(),
+      onSearchAll: vi.fn(),
+      recentFilters: () => ["severity=high", "process:powershell"],
+      onRecent,
+    });
+    document.body.append(builder.root);
+    const anchor = document.createElement("div");
+    builder.open(anchor, "");
+    const chips = builder.root.querySelectorAll<HTMLButtonElement>(".cr-builder-recent .cr-builder-colchip");
+    expect(Array.from(chips).map((c) => c.textContent)).toEqual(["severity=high", "process:powershell"]);
+    chips[1].click();
+    expect(onRecent).toHaveBeenCalledWith("process:powershell");
+    builder.setTyped("m");
+    expect(builder.root.querySelector(".cr-builder-recent")).toBeNull();
+  });
+
   it("closes from its own button and reports it", () => {
     const { builder, anchor } = mount();
     const onClose = vi.fn();

@@ -4,6 +4,8 @@ const STORAGE_KEY = "clear-rows-preferences";
 const LEGACY_STORAGE_KEY = "dataparser-preferences";
 const MAX_RECENT_SEARCH_PATHS = 50;
 const MAX_RECENT_FILES = 12;
+const MAX_RECENT_FILTERS_PER_FILE = 8;
+const MAX_FILES_WITH_RECENT_FILTERS = 40;
 
 export type RecentFile = {
   path: string;
@@ -17,6 +19,8 @@ type StoredPreferences = {
   recentSearchPaths?: string[];
   recentFiles?: RecentFile[];
   searchMode?: "file" | "files";
+  /** Recently applied filter queries, newest first, keyed by file path. */
+  recentFilters?: Record<string, string[]>;
 };
 
 export function getStoredSearchLimit(): number {
@@ -51,6 +55,30 @@ export function rememberRecentFile(entry: Omit<RecentFile, "openedAt">): void {
 export function forgetRecentFile(path: string): void {
   const next = getRecentFiles().filter((item) => item.path !== path);
   writePreferences({ ...readPreferences(), recentFiles: next });
+}
+
+/** Filters applied to this file before, newest first. */
+export function getRecentFilters(path: string): string[] {
+  const all = readPreferences().recentFilters ?? {};
+  return Array.isArray(all[path]) ? all[path].filter((q) => typeof q === "string" && q.trim().length > 0) : [];
+}
+
+export function rememberRecentFilter(path: string, query: string): void {
+  const trimmed = query.trim();
+  if (!trimmed) return;
+  const all = { ...(readPreferences().recentFilters ?? {}) };
+  const next = [trimmed, ...getRecentFilters(path).filter((q) => q !== trimmed)].slice(0, MAX_RECENT_FILTERS_PER_FILE);
+  // Move this file to the front so the oldest files fall off first.
+  delete all[path];
+  const entries = [[path, next] as const, ...Object.entries(all)].slice(0, MAX_FILES_WITH_RECENT_FILTERS);
+  writePreferences({ ...readPreferences(), recentFilters: Object.fromEntries(entries) });
+}
+
+export function forgetRecentFilter(path: string, query: string): void {
+  const all = { ...(readPreferences().recentFilters ?? {}) };
+  all[path] = getRecentFilters(path).filter((q) => q !== query);
+  if (all[path].length === 0) delete all[path];
+  writePreferences({ ...readPreferences(), recentFilters: all });
 }
 
 export function getStoredSearchMode(): "file" | "files" {

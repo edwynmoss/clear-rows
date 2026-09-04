@@ -31,6 +31,8 @@ export type CsvFileProfile = {
   has_header: boolean;
   /** "detected" | "user" — how the header decision was made. */
   header_source: string;
+  /** "gzip" when the file was decompressed before reading. */
+  compression: string | null;
   warnings: string[];
 };
 

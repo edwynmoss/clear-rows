@@ -12,7 +12,10 @@ import { getVersion } from "@tauri-apps/api/app";
 import { registerVirtualFile } from "./browser-shim";
 import { isDesktopRuntime } from "./runtime";
 
-const FILE_FILTERS = [{ name: "Delimited text", extensions: ["csv", "tsv", "txt", "tab", "dat", "log"] }];
+const FILE_FILTERS = [
+  { name: "Delimited text", extensions: ["csv", "tsv", "txt", "tab", "dat", "log", "gz"] },
+  { name: "Compressed (gzip)", extensions: ["gz"] },
+];
 
 export type DropHandler = {
   onOver: () => void;
@@ -93,7 +96,7 @@ async function browserPick(multiple: boolean): Promise<string[]> {
     const input = document.createElement("input");
     input.type = "file";
     input.multiple = multiple;
-    input.accept = ".csv,.tsv,.txt,.tab,.dat,.log,text/csv,text/plain";
+    input.accept = ".csv,.tsv,.txt,.tab,.dat,.log,.gz,text/csv,text/plain,application/gzip";
     input.style.display = "none";
     document.body.append(input);
     input.addEventListener("change", async () => {
@@ -112,8 +115,15 @@ async function browserPick(multiple: boolean): Promise<string[]> {
 }
 
 async function registerBrowserFile(file: File): Promise<string> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
+  let bytes = new Uint8Array(await file.arrayBuffer());
   const path = `browser://${file.name}`;
+  // gzip in the browser: the same magic check the Rust side makes.
+  if (bytes[0] === 0x1f && bytes[1] === 0x8b && typeof DecompressionStream === "function") {
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+    bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+    registerVirtualFile(path, bytes, file.size, "gzip");
+    return path;
+  }
   registerVirtualFile(path, bytes, file.size);
   return path;
 }

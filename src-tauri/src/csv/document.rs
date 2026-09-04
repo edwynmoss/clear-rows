@@ -212,7 +212,20 @@ impl CsvDocument {
         options: OpenOptions,
     ) -> Result<Self, CsvError> {
         let path = path.as_ref().to_path_buf();
-        let mut profiled = profile_csv_path(&path)?;
+        // Compressed exports (.csv.gz) are inflated once into the cache and
+        // read from there; `path` stays the name the user sees.
+        let mut cache_guards: Vec<CacheGuard> = Vec::new();
+        let source_path = match inflate_if_compressed(&path)? {
+            Some((inflated, guard)) => {
+                cache_guards.push(guard);
+                inflated
+            }
+            None => path.clone(),
+        };
+        let mut profiled = profile_csv_path(&source_path)?;
+        if source_path != path {
+            profiled.profile.compression = Some("gzip".to_owned());
+        }
 
         // User overrides win over auto-detection. Applied after profiling so we
         // still benefit from the profile's binary-like / sample-based checks.
@@ -220,7 +233,7 @@ impl CsvDocument {
             apply_delimiter_override(&mut profiled, delimiter);
         }
         if let Some(encoding_override) = options.encoding_override.as_deref() {
-            apply_encoding_override(&mut profiled, encoding_override, &path)?;
+            apply_encoding_override(&mut profiled, encoding_override, &source_path)?;
         }
 
         if profiled.profile.binary_like {
@@ -229,8 +242,8 @@ impl CsvDocument {
             ));
         }
 
-        let (mut read_path, mut read_data_start, cache_guard) = prepare_utf8_source(&path, &profiled)?;
-        let mut cache_guards: Vec<CacheGuard> = cache_guard.into_iter().collect();
+        let (mut read_path, mut read_data_start, cache_guard) = prepare_utf8_source(&source_path, &profiled)?;
+        cache_guards.extend(cache_guard);
 
         // First row: column names or data? Files without a header get a
         // working copy with generated names prepended, so every reader keeps
@@ -780,6 +793,55 @@ pub(crate) fn transcode_chunked(
         }
     }
     Ok(())
+}
+
+/// gzip magic bytes.
+const GZIP_MAGIC: [u8; 2] = [0x1F, 0x8B];
+
+/// True when the file starts like a gzip stream.
+pub(crate) fn is_gzip(path: &Path) -> std::io::Result<bool> {
+    let mut file = File::open(path)?;
+    let mut magic = [0u8; 2];
+    let n = file.read(&mut magic)?;
+    Ok(n == 2 && magic == GZIP_MAGIC)
+}
+
+/// Inflate a gzip file into the cache directory. Returns None for files
+/// that are not gzip. Multi-member streams (concatenated gzips, as some log
+/// rotators write) are handled.
+pub(crate) fn inflate_if_compressed(path: &Path) -> std::io::Result<Option<(PathBuf, CacheGuard)>> {
+    if !is_gzip(path)? {
+        return Ok(None);
+    }
+    let cache_dir = std::env::temp_dir().join("clear-rows").join("utf8-cache");
+    std::fs::create_dir_all(&cache_dir)?;
+    let cache_path = unique_cache_path(&cache_dir, path, "inflated");
+    let guard = CacheGuard { path: cache_path.clone() };
+    let mut decoder = flate2::read::MultiGzDecoder::new(std::io::BufReader::with_capacity(1 << 20, File::open(path)?));
+    let mut writer = BufWriter::with_capacity(1 << 20, File::create(&cache_path)?);
+    std::io::copy(&mut decoder, &mut writer)?;
+    writer.flush()?;
+    let file = writer.into_inner().map_err(|e| e.into_error())?;
+    file.sync_all()?;
+    Ok(Some((cache_path, guard)))
+}
+
+/// Inflate only the first `limit` bytes of a gzip file, for profiling a file
+/// without unpacking all of it. Returns None for files that are not gzip.
+pub(crate) fn inflate_prefix(path: &Path, limit: u64) -> std::io::Result<Option<(PathBuf, CacheGuard)>> {
+    if !is_gzip(path)? {
+        return Ok(None);
+    }
+    let cache_dir = std::env::temp_dir().join("clear-rows").join("utf8-cache");
+    std::fs::create_dir_all(&cache_dir)?;
+    let cache_path = unique_cache_path(&cache_dir, path, "peek");
+    let guard = CacheGuard { path: cache_path.clone() };
+    let decoder = flate2::read::MultiGzDecoder::new(std::io::BufReader::new(File::open(path)?));
+    let mut limited = decoder.take(limit);
+    let mut writer = BufWriter::new(File::create(&cache_path)?);
+    std::io::copy(&mut limited, &mut writer)?;
+    writer.flush()?;
+    Ok(Some((cache_path, guard)))
 }
 
 /// Unique-per-call cache name: pid + nanos + source-path hash. Avoids
@@ -1354,6 +1416,26 @@ mod tests {
         let document = CsvDocument::open(&path).unwrap();
         let types: Vec<ColumnType> = document.summarize().column_types.iter().map(|c| c.kind).collect();
         assert_eq!(types, [ColumnType::Integer, ColumnType::Date, ColumnType::Decimal, ColumnType::Text]);
+        drop(document);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn opens_gzip_compressed_csv() {
+        use std::io::Write as _;
+        let path = std::env::temp_dir().join(format!("clear_rows_gz_{}.csv.gz", std::process::id()));
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(b"id,name\n1,Ann\n2,Bo\n3,Cy\n").unwrap();
+        fs::write(&path, encoder.finish().unwrap()).unwrap();
+
+        let mut document = CsvDocument::open(&path).expect("open gzip csv");
+        let summary = document.summarize();
+        assert_eq!(summary.headers, ["id", "name"]);
+        assert_eq!(summary.row_count, 3);
+        assert_eq!(summary.profile.compression.as_deref(), Some("gzip"));
+        assert_eq!(summary.path, path.to_string_lossy());
+        let rows = document.get_rows(0, 3, 0, 2).unwrap();
+        assert_eq!(rows.rows[2], vec!["3", "Cy"]);
         drop(document);
         let _ = fs::remove_file(path);
     }

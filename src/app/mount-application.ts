@@ -3,11 +3,14 @@ import { CSV_ROW_HEIGHT_PX } from "./constants";
 import { directoryOf, fileNameOf, formatBytes, formatEncoding, formatInt, formatRate, pluralize } from "./format";
 import {
   forgetRecentFile,
+  forgetRecentFilter,
   getRecentFiles,
+  getRecentFilters,
   getRecentSearchPaths,
   getStoredSearchLimit,
   getStoredSearchMode,
   rememberRecentFile,
+  rememberRecentFilter,
   storeRecentSearchPaths,
   storeSearchLimit,
   storeSearchMode,
@@ -304,6 +307,14 @@ export function mountApplication(host: HTMLElement): void {
       builderDismissed = true;
       queryBar.focus({ caretAtEnd: true });
     },
+    recentFilters: () => (session.path ? getRecentFilters(session.path) : []),
+    onRecent: (query) => {
+      filterBuilder.close();
+      void applyFilter(query);
+    },
+    onForgetRecent: (query) => {
+      if (session.path) forgetRecentFilter(session.path, query);
+    },
   });
   let builderBlurTimer = 0;
   /** True after the user closed the builder while still in the field. */
@@ -434,6 +445,7 @@ export function mountApplication(host: HTMLElement): void {
       encoding: profile.encoding,
       encodingSource: profile.encoding_source,
       delimiterLabel: profile.delimiter_label,
+      compression: profile.compression,
       isIndexing,
       hasWarning: profile.warnings.some((w) => !isSoftWarning(w)) || profile.encoding === "utf-8-lossy",
     });
@@ -777,6 +789,7 @@ export function mountApplication(host: HTMLElement): void {
         queryBar.setBusy(false);
         statusBar.setActivity(null);
         refreshColumnPanel();
+        if (session.path) rememberRecentFilter(session.path, query);
         statusBar.setMessage(
           status.matched_rows === 0 ? "No rows match" : `${formatInt(status.matched_rows)} of ${formatInt(status.total_rows)} rows match`,
           status.matched_rows === 0 ? "warning" : "neutral",
