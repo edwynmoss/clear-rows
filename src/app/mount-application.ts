@@ -364,9 +364,18 @@ export function mountApplication(host: HTMLElement): void {
   virtualizer.bind();
   host.replaceChildren(shell.root);
 
-  // Offer a newer release once per launch, a few seconds after start so the
-  // file the user opened is on screen first. Manual checks come from the palette.
+  // Offer a newer release a few seconds after start (so the file the user
+  // opened is on screen first), then every few hours while the app stays
+  // open, and when the window regains focus after a long while. A release
+  // published while the app was already running is still noticed.
+  const UPDATE_RECHECK_MS = 6 * 60 * 60 * 1000;
+  const UPDATE_FOCUS_MS = 60 * 60 * 1000;
+  let lastUpdateCheck = 0;
   window.setTimeout(() => void offerUpdate(false), 4_000);
+  window.setInterval(() => void offerUpdate(false), UPDATE_RECHECK_MS);
+  window.addEventListener("focus", () => {
+    if (Date.now() - lastUpdateCheck > UPDATE_FOCUS_MS) void offerUpdate(false);
+  });
 
   void appVersion().then((version) => {
     if (!version) return;
@@ -1405,6 +1414,7 @@ export function mountApplication(host: HTMLElement): void {
   /** Ask GitHub for a newer release; show it as a toast. */
   async function offerUpdate(manual: boolean): Promise<void> {
     if (updateInstalling) return;
+    lastUpdateCheck = Date.now();
     if (manual) statusBar.setMessage("Checking for updates", "neutral");
     const info = await checkForUpdate();
     if (!info) {
@@ -1419,7 +1429,7 @@ export function mountApplication(host: HTMLElement): void {
     if (manual) statusBar.setMessage("", "neutral");
     toasts.show({
       title: `Version ${info.version} is available`,
-      detail: firstLine(info.notes) || `You have ${info.currentVersion}. The update installs in the background and restarts the app.`,
+      detail: `${summarizeNotes(info.notes) || "The update installs in the background and restarts the app."} You have ${info.currentVersion}.`,
       tone: "neutral",
       duration: 0,
       action: { label: "Install and restart", onClick: () => void installUpdate() },
@@ -1444,8 +1454,16 @@ export function mountApplication(host: HTMLElement): void {
     }
   }
 
-  function firstLine(text: string): string {
-    return text.split(/\r?\n/).map((line) => line.replace(/^[#*\-\s]+/, "").trim()).find((line) => line.length > 0) ?? "";
+  /** The first real sentence of the release notes: headings and list markers skipped, markdown links flattened. */
+  function summarizeNotes(text: string): string {
+    const line = text
+      .split(/\r?\n/)
+      .map((raw) => raw.trim())
+      .filter((raw) => raw.length > 0 && !raw.startsWith("#"))
+      .map((raw) => raw.replace(/^[*\-]\s+/, "").replace(/\*\*/g, "").replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").replace(/`/g, ""))
+      .find((raw) => raw.length > 0);
+    if (!line) return "";
+    return line.length > 160 ? `${line.slice(0, 157).trimEnd()}...` : line;
   }
 
   async function refitColumns(): Promise<void> {
