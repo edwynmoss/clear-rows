@@ -61,7 +61,16 @@ Windows, macOS and Linux builds are on the [releases page](https://github.com/ed
 
 From 1.0.1 on the app checks for a newer release a few seconds after launch and offers it in a toast; one click installs it and restarts. **Check for updates** is also in the command palette.
 
-The Windows and macOS builds are not yet code-signed, so expect a SmartScreen or Gatekeeper prompt on first launch.
+The Windows and macOS builds are not code-signed, and will not be: a certificate
+is a yearly cost and this is free software. Expect SmartScreen ("More info → Run
+anyway") on Windows, and on macOS either right-click → Open, or
+`xattr -d com.apple.quarantine` on the app. The warning is about who published
+the build; every release is still signed with the project's own key and the
+signature is checked before an update installs.
+
+**Tested on Windows only.** The macOS and Linux artefacts are built by CI on
+every release but nobody has launched them on real hardware, so treat them as
+untested. Reports from either platform are welcome.
 
 ## Keyboard
 
