@@ -34,19 +34,41 @@ type DownloadEvent =
 
 let pending: Update | null = null;
 
-/** Check once; resolves to null when up to date, not on desktop, or offline. */
-export async function checkForUpdate(): Promise<UpdateInfo | null> {
-  if (!isDesktopRuntime()) return null;
+/**
+ * The outcome of one check. Being up to date and being unable to ask are
+ * different things: for a while both were reported the same way, and asking
+ * for updates while the manifest was unreachable answered "you are up to
+ * date", which is a claim the app had not established. A check that could
+ * not happen now says so.
+ */
+export type UpdateCheck =
+  | { kind: "update"; info: UpdateInfo }
+  | { kind: "current" }
+  | { kind: "unavailable"; reason: string }
+  /** Not the desktop build, so there is nothing to check. */
+  | { kind: "unsupported" };
+
+/** Check once. Never throws: the caller decides what is worth saying. */
+export async function checkForUpdate(): Promise<UpdateCheck> {
+  if (!isDesktopRuntime()) return { kind: "unsupported" };
   try {
     const { check } = await import("@tauri-apps/plugin-updater");
     const update = await check({ timeout: 8_000 });
-    if (!update) return null;
+    if (!update) return { kind: "current" };
     pending = update;
-    return { version: update.version, currentVersion: update.currentVersion, notes: update.body ?? "" };
-  } catch {
-    // No network, no manifest yet, or a signature mismatch: never bother the user.
-    return null;
+    return { kind: "update", info: { version: update.version, currentVersion: update.currentVersion, notes: update.body ?? "" } };
+  } catch (err) {
+    // Offline, no manifest published, or a signature that did not verify.
+    return { kind: "unavailable", reason: describe(err) };
   }
+}
+
+/** A short reason, for the line under a toast. */
+function describe(err: unknown): string {
+  const text = err instanceof Error ? err.message : String(err ?? "");
+  const trimmed = text.trim();
+  if (!trimmed) return "The update service could not be reached.";
+  return trimmed.length > 160 ? `${trimmed.slice(0, 157).trimEnd()}...` : trimmed;
 }
 
 /** Download the pending update, then relaunch into it. Rejects on failure. */

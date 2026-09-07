@@ -1416,14 +1416,27 @@ export function mountApplication(host: HTMLElement): void {
     if (updateInstalling) return;
     lastUpdateCheck = Date.now();
     if (manual) statusBar.setMessage("Checking for updates", "neutral");
-    const info = await checkForUpdate();
-    if (!info) {
+    const result = await checkForUpdate();
+    if (result.kind !== "update") {
+      // An automatic check stays quiet whatever the answer: being offline is
+      // ordinary. Someone who asked deserves the truth, including when the
+      // check could not be made at all.
       if (manual) {
         statusBar.setMessage("", "neutral");
-        toasts.show({ title: `Clear Rows ${appVersionLabel} is up to date`, tone: "neutral", duration: 4000 });
+        if (result.kind === "unavailable") {
+          toasts.show({
+            title: "Could not check for updates",
+            detail: `${result.reason} You have ${appVersionLabel}.`,
+            tone: "warning",
+            duration: 8000,
+          });
+        } else if (result.kind === "current") {
+          toasts.show({ title: `Clear Rows ${appVersionLabel} is up to date`, tone: "neutral", duration: 4000 });
+        }
       }
       return;
     }
+    const info = result.info;
     if (!manual && updateOffered?.version === info.version) return;
     updateOffered = info;
     if (manual) statusBar.setMessage("", "neutral");
