@@ -1,0 +1,296 @@
+[
+  {
+    "waitFor": "window.__clearRows && window.__clearRows.session.rowCount === 20000 && !document.querySelector('.cr-status-live:not([hidden])')",
+    "timeout": 120000
+  },
+  {
+    "eval": "(() => { const s = document.querySelector('.cr-grid-scroll'); s.scrollTop = s.scrollHeight; s.scrollLeft = 160; return s.scrollTop; })()"
+  },
+  {
+    "waitFor": "document.querySelector('.cr-grid-scroll').scrollTop > 100000 && document.querySelectorAll('.cr-row').length > 0"
+  },
+  {
+    "eval": "window.filterScrollLeft = document.querySelector('.cr-grid-scroll').scrollLeft; 'saved horizontal position'"
+  },
+  {
+    "key": "f",
+    "mods": 2
+  },
+  {
+    "key": "a",
+    "mods": 2
+  },
+  {
+    "keys": "process:powershell"
+  },
+  {
+    "key": "Enter"
+  },
+  {
+    "waitFor": "window.__clearRows.session.activeFilter?.query === \"process:powershell\" && !document.querySelector('.cr-status-live:not([hidden])')",
+    "timeout": 60000
+  },
+  {
+    "waitFor": "document.querySelector('.cr-grid')?.dataset.stale !== 'true' && !document.querySelector('.cr-status-live:not([hidden])')",
+    "timeout": 30000
+  },
+  {
+    "expect": "document.querySelector('.cr-grid-scroll').scrollTop",
+    "equals": 0
+  },
+  {
+    "expect": "document.querySelectorAll('.cr-row').length > 0 && document.querySelector('.cr-row-num')?.textContent === '1'",
+    "equals": true
+  },
+  {
+    "expect": "document.querySelector('.cr-grid-scroll').scrollLeft === window.filterScrollLeft",
+    "equals": true
+  },
+  {
+    "expect": "document.activeElement.classList.contains('cr-query-input')",
+    "equals": true
+  },
+  {
+    "expect": "[...document.querySelectorAll('.cr-row [data-column-index=\"3\"]')].every(c => c.textContent === 'powershell.exe')",
+    "equals": true
+  },
+  {
+    "shot": "filter-scroll-first-results"
+  },
+  {
+    "eval": "(() => { const s = document.querySelector('.cr-grid-scroll'); s.scrollTop = s.scrollHeight; s.scrollLeft = 160; return s.scrollTop; })()"
+  },
+  {
+    "key": "f",
+    "mods": 2
+  },
+  {
+    "key": "a",
+    "mods": 2
+  },
+  {
+    "keys": "severity=high"
+  },
+  {
+    "key": "Enter"
+  },
+  {
+    "waitFor": "window.__clearRows.session.activeFilter?.query === \"severity=high\" && !document.querySelector('.cr-status-live:not([hidden])')",
+    "timeout": 60000
+  },
+  {
+    "waitFor": "document.querySelector('.cr-grid')?.dataset.stale !== 'true' && !document.querySelector('.cr-status-live:not([hidden])')",
+    "timeout": 30000
+  },
+  {
+    "expect": "document.querySelector('.cr-grid-scroll').scrollTop",
+    "equals": 0
+  },
+  {
+    "expect": "document.querySelectorAll('.cr-row').length > 0 && document.querySelector('.cr-row-num')?.textContent === '1'",
+    "equals": true
+  },
+  {
+    "expect": "document.querySelectorAll('.cr-chip').length",
+    "equals": 1
+  },
+  {
+    "eval": "(() => { const s = document.querySelector('.cr-grid-scroll'); s.scrollTop = s.scrollHeight; s.scrollLeft = 160; return s.scrollTop; })()"
+  },
+  {
+    "key": "f",
+    "mods": 2
+  },
+  {
+    "key": "a",
+    "mods": 2
+  },
+  {
+    "keys": "clear-rows-no-such-value-issue-2"
+  },
+  {
+    "key": "Enter"
+  },
+  {
+    "waitFor": "window.__clearRows.session.activeFilter?.query === \"clear-rows-no-such-value-issue-2\" && !document.querySelector('.cr-status-live:not([hidden])')",
+    "timeout": 60000
+  },
+  {
+    "waitFor": "document.querySelector('.cr-grid')?.dataset.stale !== 'true' && !document.querySelector('.cr-status-live:not([hidden])')",
+    "timeout": 30000
+  },
+  {
+    "expect": "document.querySelector('.cr-grid-scroll').scrollTop",
+    "equals": 0
+  },
+  {
+    "expect": "window.__clearRows.session.scrollRowCount",
+    "equals": 0
+  },
+  {
+    "expect": "document.querySelectorAll('.cr-row').length",
+    "equals": 0
+  },
+  {
+    "expect": "document.querySelector('.cr-status-message').textContent",
+    "equals": "No rows match"
+  },
+  {
+    "shot": "filter-scroll-no-matches"
+  },
+  {
+    "key": "f",
+    "mods": 2
+  },
+  {
+    "key": "a",
+    "mods": 2
+  },
+  {
+    "keys": "process:chrome"
+  },
+  {
+    "key": "Enter"
+  },
+  {
+    "waitFor": "window.__clearRows.session.activeFilter?.query === \"process:chrome\" && !document.querySelector('.cr-status-live:not([hidden])')",
+    "timeout": 60000
+  },
+  {
+    "waitFor": "document.querySelector('.cr-grid')?.dataset.stale !== 'true' && !document.querySelector('.cr-status-live:not([hidden])')",
+    "timeout": 30000
+  },
+  {
+    "expect": "document.querySelector('.cr-grid-scroll').scrollTop",
+    "equals": 0
+  },
+  {
+    "expect": "document.querySelectorAll('.cr-row').length > 0 && document.querySelector('.cr-row-num')?.textContent === '1'",
+    "equals": true
+  },
+  {
+    "eval": "window.__clearRows.clearFilter().then(() => 'cleared')"
+  },
+  {
+    "waitFor": "document.querySelector('.cr-grid')?.dataset.stale !== 'true' && !document.querySelector('.cr-status-live:not([hidden])')",
+    "timeout": 30000
+  },
+  {
+    "expect": "window.__clearRows.session.activeFilter === null && window.__clearRows.session.scrollRowCount === 20000",
+    "equals": true
+  },
+  {
+    "expect": "document.querySelectorAll('.cr-row').length > 0 && document.querySelector('.cr-row-num')?.textContent === '1'",
+    "equals": true
+  },
+  {
+    "eval": "document.querySelector('.cr-grid-scroll').scrollTop = 2800; 'scrolled'"
+  },
+  {
+    "waitFor": "document.querySelector('.cr-grid-scroll').scrollTop === 2800"
+  },
+  {
+    "key": "f",
+    "mods": 2
+  },
+  {
+    "key": "a",
+    "mods": 2
+  },
+  {
+    "keys": "missingcolumn:value"
+  },
+  {
+    "key": "Enter"
+  },
+  {
+    "waitFor": "!document.querySelector('.cr-query-error').hidden"
+  },
+  {
+    "expect": "document.querySelector('.cr-grid-scroll').scrollTop",
+    "equals": 2800
+  },
+  {
+    "expect": "window.__clearRows.session.activeFilter",
+    "equals": null
+  },
+  {
+    "eval": "window.__clearRows.clearFilter().then(() => 'cleared invalid query')"
+  },
+  {
+    "waitFor": "document.querySelector('.cr-grid')?.dataset.stale !== 'true' && !document.querySelector('.cr-status-live:not([hidden])')",
+    "timeout": 30000
+  },
+  {
+    "key": "Escape"
+  },
+  {
+    "eval": "document.querySelector('.cr-grid-scroll').scrollLeft = 0; 'show sort column'"
+  },
+  {
+    "waitFor": "document.querySelector('.cr-col[data-column-index=\"1\"]') !== null"
+  },
+  {
+    "click": ".cr-col[data-column-index=\"1\"]"
+  },
+  {
+    "waitFor": "/^Sorted/.test(document.querySelector('.cr-status-message')?.textContent || '')",
+    "timeout": 60000
+  },
+  {
+    "waitFor": "document.querySelector('.cr-grid')?.dataset.stale !== 'true' && !document.querySelector('.cr-status-live:not([hidden])')",
+    "timeout": 30000
+  },
+  {
+    "expect": "document.querySelector('.cr-grid-scroll').scrollTop",
+    "equals": 2800
+  },
+  {
+    "key": "f",
+    "mods": 2
+  },
+  {
+    "key": "a",
+    "mods": 2
+  },
+  {
+    "keys": "process:powershell"
+  },
+  {
+    "key": "Enter"
+  },
+  {
+    "waitFor": "window.__clearRows.session.activeFilter?.query === \"process:powershell\" && !document.querySelector('.cr-status-live:not([hidden])')",
+    "timeout": 60000
+  },
+  {
+    "waitFor": "document.querySelector('.cr-grid')?.dataset.stale !== 'true' && !document.querySelector('.cr-status-live:not([hidden])')",
+    "timeout": 30000
+  },
+  {
+    "expect": "document.querySelector('.cr-grid-scroll').scrollTop",
+    "equals": 0
+  },
+  {
+    "expect": "document.querySelectorAll('.cr-row').length > 0 && document.querySelector('.cr-row-num')?.textContent === '1'",
+    "equals": true
+  },
+  {
+    "expect": "window.__clearRows.session.activeSort.length",
+    "equals": 1
+  },
+  {
+    "eval": "window.__clearRows.clearFilter().then(() => 'cleared sorted filter')"
+  },
+  {
+    "waitFor": "document.querySelector('.cr-grid')?.dataset.stale !== 'true' && !document.querySelector('.cr-status-live:not([hidden])')",
+    "timeout": 30000
+  },
+  {
+    "expect": "document.querySelectorAll('.cr-row').length > 0",
+    "equals": true
+  },
+  {
+    "shot": "filter-scroll-restored"
+  }
+]

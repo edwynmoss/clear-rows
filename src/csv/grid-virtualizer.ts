@@ -176,7 +176,7 @@ export class CsvGridVirtualizer {
   async refresh(): Promise<void> {
     const generation = ++this.refreshGeneration;
     const { spacerTop, spacerBottom, windowRows, scrollRegion } = this.refs;
-    const availableRowCount = this.session.rowCount;
+    const availableRowCount = this.session.activeFilter?.matchedRows ?? this.session.rowCount;
     const scrollRowCount = Math.max(this.session.scrollRowCount, availableRowCount === 0 ? 0 : 1);
     const rowHeight = this.rowHeightPx;
     const columnWindow = this.calculateColumnWindow();
@@ -188,6 +188,7 @@ export class CsvGridVirtualizer {
       spacerTop.style.height = "0px";
       spacerBottom.style.height = "0px";
       windowRows.replaceChildren();
+      delete this.refs.root.dataset.stale;
       return;
     }
 
@@ -365,9 +366,14 @@ export class CsvGridVirtualizer {
     if (refresh) this.scheduleRefresh();
   }
 
-  resetRowsForVisibilityChange(): void {
+  resetRowsForVisibilityChange(options: { scroll?: "preserve" | "top" } = {}): void {
     this.refreshGeneration++;
     this.rowStore.clear();
+    // A new filter starts at its first match; sorting and clearing keep the viewport.
+    if (options.scroll === "top") {
+      this.refs.scrollRegion.scrollTop = 0;
+      this.lastScrollTop = 0;
+    }
     // Keep the current rows on screen, dimmed, until the new page arrives.
     // Clearing here produced a blank grid for the length of the fetch.
     this.refs.root.dataset.stale = "true";

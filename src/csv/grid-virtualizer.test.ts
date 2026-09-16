@@ -1,10 +1,17 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { createCsvPreviewGrid } from "../components/csv-preview-grid";
 import { CsvSession } from "./csv-session";
 import { CsvGridVirtualizer } from "./grid-virtualizer";
 import type { RowBatch } from "../types/csv";
+
+const cleanups: (() => void)[] = [];
+
+afterEach(() => {
+  cleanups.splice(0).forEach((cleanup) => cleanup());
+  document.body.replaceChildren();
+});
 
 function setup(rowCount: number) {
   const session = new CsvSession();
@@ -52,10 +59,63 @@ function setup(rowCount: number) {
     return { start, column_start: columnStart, rows };
   };
   const virtualizer = new CsvGridVirtualizer({ refs, session, fetchRows, rowHeightPx: 28 });
+  cleanups.push(() => {
+    release?.();
+    virtualizer.dispose();
+  });
   return { session, refs, virtualizer, releaseFetch: () => release?.(), fetchCount: () => fetches };
 }
 
 describe("grid virtualizer", () => {
+  it.each([1, 100, 20_000, 0])("starts a new filter with %i matches at the top without moving columns or focus", async (matchedRows) => {
+    const { session, refs, virtualizer, releaseFetch } = setup(20_000);
+    releaseFetch();
+    session.colWidths = [800, 800];
+    refs.scrollRegion.scrollTop = 20_000 * 28 - 280;
+    refs.scrollRegion.scrollLeft = 120;
+    await virtualizer.refresh();
+    expect(refs.windowRows.children.length).toBeGreaterThan(0);
+    virtualizer.setHighlightedCell({ rowIndex: 19_999, columnIndex: 1 });
+    const input = document.createElement("input");
+    document.body.append(input);
+    input.focus();
+
+    session.applyActiveFilter({ query: "match", matchedRows });
+    virtualizer.resetRowsForVisibilityChange({ scroll: "top" });
+    await virtualizer.refresh();
+
+    expect(refs.scrollRegion.scrollTop).toBe(0);
+    expect(refs.scrollRegion.scrollLeft).toBe(120);
+    expect(document.activeElement).toBe(input);
+    expect(virtualizer.getHighlightedCell()).toBeNull();
+    expect(refs.root.dataset.stale).toBeUndefined();
+    expect(refs.spacerTop.style.height).toBe("0px");
+    if (matchedRows === 0) {
+      expect(refs.windowRows.children).toHaveLength(0);
+      expect(refs.spacerBottom.style.height).toBe("0px");
+    } else {
+      expect(refs.windowRows.children.length).toBeLessThanOrEqual(matchedRows);
+      expect(refs.windowRows.querySelector(".cr-row-num")?.textContent).toBe("1");
+    }
+  });
+
+  it("preserves the viewport when refreshing a sort or clearing a filter", async () => {
+    const { session, refs, virtualizer, releaseFetch } = setup(1_000);
+    releaseFetch();
+    session.applyActiveFilter({ query: "match", matchedRows: 500 });
+    refs.scrollRegion.scrollTop = 280;
+    await virtualizer.refresh();
+
+    for (const filter of [session.activeFilter, null]) {
+      session.applyActiveFilter(filter);
+      virtualizer.resetRowsForVisibilityChange();
+      await virtualizer.refresh();
+      expect(refs.scrollRegion.scrollTop).toBe(280);
+      expect(refs.windowRows.children.length).toBeGreaterThan(0);
+      expect(refs.root.dataset.stale).toBeUndefined();
+    }
+  });
+
   it("keeps the previous rows visible and dimmed while a refetch is pending", async () => {
     const { refs, virtualizer, releaseFetch } = setup(100);
     await virtualizer.refresh();
