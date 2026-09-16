@@ -113,8 +113,8 @@ function stopLeftovers() {
 
 function stopApp() {
   if (process.platform === "win32") {
-    spawn("taskkill", ["/pid", String(app.pid), "/t", "/f"], { stdio: "ignore", shell: true });
-    spawn("taskkill", ["/im", "clear-rows.exe", "/f"], { stdio: "ignore", shell: true });
+    spawnSync("taskkill", ["/pid", String(app.pid), "/t", "/f"], { stdio: "ignore", shell: true });
+    spawnSync("taskkill", ["/im", "clear-rows.exe", "/f"], { stdio: "ignore", shell: true });
   } else {
     app.kill("SIGTERM");
   }

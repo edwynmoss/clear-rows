@@ -803,7 +803,7 @@ export function mountApplication(host: HTMLElement): void {
           status.matched_rows === 0 ? "No rows match" : `${formatInt(status.matched_rows)} of ${formatInt(status.total_rows)} rows match`,
           status.matched_rows === 0 ? "warning" : "neutral",
         );
-        virtualizer.resetRowsForVisibilityChange();
+        virtualizer.resetRowsForVisibilityChange({ scroll: "top" });
         virtualizer.updateAria();
         jumpToRow.setMaxRow(session.scrollRowCount);
         return;
