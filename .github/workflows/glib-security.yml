@@ -1,0 +1,25 @@
+name: GLib security regression
+
+on:
+  workflow_call:
+
+jobs:
+  variant-iterator:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri/vendor/glib
+      - name: GLib test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-dev pkg-config
+      - name: Verify application dependency source
+        run: node scripts/verify-glib-source.mjs
+      - name: Optimized iterator regression tests
+        run: cargo test --manifest-path src-tauri/vendor/glib/Cargo.toml --locked --release --lib variant_iter

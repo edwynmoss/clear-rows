@@ -22,7 +22,11 @@ permissions:
   contents: write
 
 jobs:
+  glib-security:
+    uses: ./.github/workflows/glib-security.yml
+
   build:
+    needs: glib-security
     strategy:
       fail-fast: false
       matrix:
